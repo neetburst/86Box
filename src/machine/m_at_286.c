@@ -17,6 +17,7 @@
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
 #define HAVE_STDARG_H
@@ -142,7 +143,7 @@ machine_at_ibm_common_init(const machine_t *model)
 {
     machine_at_common_init(model);
 
-    device_add_params(machine_get_kbc_device(machine), (void *) model->kbc_params);
+    machine_at_add_kbc(model);
 
     mem_remap_top(384);
 
@@ -648,7 +649,7 @@ machine_at_siemens_init(const machine_t *model)
 
     machine_at_common_init(model);
 
-    device_add_params(machine_get_kbc_device(machine), (void *) model->kbc_params);
+    machine_at_add_kbc(model);
 
     mem_remap_top(384);
 
@@ -736,7 +737,7 @@ machine_at_super286c_init(const machine_t *model)
 
     machine_at_common_init(model);
 
-    device_add_params(machine_get_kbc_device(machine), (void *) model->kbc_params);
+    machine_at_add_kbc(model);
 
     if (fdc_current[0] == FDC_INTERNAL)
         device_add(&fdc_at_device);
@@ -1010,7 +1011,7 @@ machine_at_scat_init(const machine_t *model, int is_v4, int is_ami)
 {
     machine_at_common_init(model);
 
-    device_add_params(machine_get_kbc_device(machine), (void *) model->kbc_params);
+    machine_at_add_kbc(model);
 
     if (is_v4)
         device_add(&scat_4_device);

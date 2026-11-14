@@ -74,7 +74,9 @@ uint64_t RTCCONST;
 uint64_t ACPICONST;
 
 int refresh_at_enable = 1;
-int io_delay          = 5;
+
+int io_delay = 5;
+int io_delay_multi = 0;
 
 int64_t firsttime = 1;
 
@@ -380,6 +382,20 @@ pit_read(uint16_t addr, void *priv)
     const uint8_t value = pitx_data_read(&dev->exact, port);
     pit_exact_sync_channel(dev, port);
     return value;
+}
+
+/* The 8253 sits on the 16-bit bus, so its A0/A1 come from CPU A1/A2
+   and the four registers appear on even addresses. */
+uint8_t
+pit_read_even(uint16_t addr, void *priv)
+{
+    return pit_read((uint16_t) ((addr & 0x0006u) >> 1), priv);
+}
+
+void
+pit_write_even(uint16_t addr, uint8_t val, void *priv)
+{
+    pit_write((uint16_t) ((addr & 0x0006u) >> 1), val, priv);
 }
 
 
@@ -742,7 +758,9 @@ uint64_t RTCCONST;
 uint64_t ACPICONST;
 
 int refresh_at_enable = 1;
-int io_delay          = 5;
+
+int io_delay = 5;
+int io_delay_multi = 0;
 
 int64_t firsttime = 1;
 
@@ -1500,6 +1518,20 @@ pit_read(uint16_t addr, void *priv)
     return ret;
 }
 
+/* The 8253 sits on the 16-bit bus, so its A0/A1 come from CPU A1/A2
+   and the four registers appear on even addresses. */
+uint8_t
+pit_read_even(uint16_t addr, void *priv)
+{
+    return pit_read((uint16_t) ((addr & 0x0006u) >> 1), priv);
+}
+
+void
+pit_write_even(uint16_t addr, uint8_t val, void *priv)
+{
+    pit_write((uint16_t) ((addr & 0x0006u) >> 1), val, priv);
+}
+
 void
 pit_irq0_timer_ps2(int new_out, int old_out, UNUSED(void *priv))
 {
@@ -1919,22 +1951,28 @@ pit_set_clock(uint32_t clock)
 #endif
         }
         
-        if (machines[machine].init == machine_xt_ibm5550_init) {
-            PITCONSTD = (cpuclock / 2000000.0); /* CLK input 2.0 MHz */
-            PITCONST  = (uint64_t) (PITCONSTD * (double) (1ULL << 32));
-        }
-
         if ((cpuclock == 24000000.0) || (cpuclock == 48000000.0))
             ISACONST     = (uint64_t) ((cpuclock / 14318184.0) * (double) (1ULL << 32));
         else
             ISACONST = (1ULL << 32ULL);
     }
+
+    /* The Multistation family clocks its 8253 from a 2.0 MHz source instead of
+       the PC's 1.19318 MHz, on the 8086 (5550) and the 286 (5535-M) alike, so
+       this must stay outside the CPU family branch above. */
+    if ((machines[machine].init == machine_xt_ibm5550_init) || (machines[machine].init == machine_xt_ibm5535_init)) {
+        PITCONSTD = (cpuclock / 2000000.0); /* CLK input 2.0 MHz */
+        PITCONST  = (uint64_t) (PITCONSTD * (double) (1ULL << 32));
+    }
+
     xt_cpu_multi <<= 32ULL;
 
     /* Delay for empty I/O ports. */
+#if 0
     io_delay = (int) round(((double) cpu_s->rspeed) / 3000000.0);
-    if (machines[machine].init == machine_xt_ibm5550_init)
+    if ((machines[machine].init == machine_xt_ibm5550_init) || (machines[machine].init == machine_xt_ibm5535_init))
         io_delay = 8;
+#endif
 
 #ifdef WRONG_MDACONST
     MDACONST  = (uint64_t) (cpuclock / 2032125.0 * (double) (1ULL << 32));

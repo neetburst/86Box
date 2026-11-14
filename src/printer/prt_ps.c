@@ -132,7 +132,12 @@ convert_to_pdf(ps_t *dev)
     void        *instance = NULL;
     char         input_fn[1024];
     char         output_fn[1024];
-    char        *gsargv[11];
+    char        *gsargv[13];
+#ifdef __APPLE__ // adds the macOS-specific GhostScript variables for loading the gsbase, includes and ICC profiles
+    char         gs_base[2048];
+    char         gs_inc[8192];
+    char         gs_icc[2200];
+#endif
 
     strcpy(input_fn, dev->printer_path);
     path_slash(input_fn);
@@ -146,6 +151,25 @@ convert_to_pdf(ps_t *dev)
     gsargv[arg++] = "-dBATCH";
     gsargv[arg++] = "-dSAFER";
     gsargv[arg++] = "-sDEVICE=pdfwrite";
+#ifdef __APPLE__
+    /* This section is searching properly for the missing resources
+        related to GhostScript on macOS and will set the correct paths for
+        gsbase and the ICC profiles. 
+    */
+    if (!dev->pcl) {
+        memset(gs_base, 0x00, sizeof(gs_base));
+        plat_get_exe_name(gs_base, sizeof(gs_base) - 32);
+        /* <bundle>/Contents/MacOS/ -> <bundle>/Contents/Resources/ghostscript */
+        strcpy(path_get_filename(gs_base), "../Resources/ghostscript");
+        if (plat_dir_check(gs_base)) {
+            snprintf(gs_inc, sizeof(gs_inc), "-I%s/Resource/Init:%s/lib:%s/Resource/Font",
+                     gs_base, gs_base, gs_base);
+            snprintf(gs_icc, sizeof(gs_icc), "-sICCProfilesDir=%s/iccprofiles/", gs_base);
+            gsargv[arg++] = gs_inc;
+            gsargv[arg++] = gs_icc;
+        }
+    }
+#endif
     if (dev->pcl) {
         if (dev->lang == LANG_PCL_6)
             gsargv[arg++] = "-LPCLXL";
@@ -512,7 +536,10 @@ ps_init(const device_t *info)
 #ifdef _WIN32
             "gsdll64.dll", "libgs-10.dll", "libgs-9.dll"
 #elif defined(__APPLE__)
-            "libgs.dylib"
+            "libgs.dylib",
+            "/opt/homebrew/lib/libgs.dylib",   /* Homebrew, Apple Silicon */
+            "/usr/local/lib/libgs.dylib",      /* Homebrew (Intel), MacPorts, manual install */
+            "/opt/local/lib/libgs.dylib"       /* MacPorts */
 #else
             "libgs.so.10", "libgs.so.9", "libgs.so"
 #endif
@@ -567,7 +594,18 @@ pcl_init(const device_t *info)
 #ifdef _WIN32
             "gpcl6dll64.dll", "libgpcl6-10.dll", "libgpcl6-9.dll"
 #elif defined(__APPLE__)
-            "libgpcl6.dylib", "libgpcl6.9.dylib", "libgpcl6.9.54.dylib"
+            "libgpcl6.dylib",
+            "libgpcl6.9.dylib",
+            "libgpcl6.9.54.dylib",
+            "/opt/homebrew/lib/libgpcl6.dylib",        /* Homebrew, Apple Silicon */
+            "/opt/homebrew/lib/libgpcl6.9.dylib",      /* Homebrew, Apple Silicon */
+            "/opt/homebrew/lib/libgpcl6.9.54.dylib",   /* Homebrew, Apple Silicon */
+            "/usr/local/lib/libgpcl6.dylib",           /* Homebrew (Intel), MacPorts, manual install */
+            "/usr/local/lib/libgpcl6.9.dylib",         /* Homebrew (Intel), MacPorts, manual install */
+            "/usr/local/lib/libgpcl6.9.54.dylib",      /* Homebrew (Intel), MacPorts, manual install */
+            "/opt/local/lib/libgpcl6.dylib",           /* MacPorts */
+            "/opt/local/lib/libgpcl6.9.dylib",         /* MacPorts */
+            "/opt/local/lib/libgpcl6.9.54.dylib"       /* MacPorts */
 #else
             "libgpcl6.so.10", "libgpcl6.so.9", "libgpcl6.so"
 #endif

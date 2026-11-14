@@ -78,6 +78,8 @@ private:
     uint64_t lpt_tracking { 0 };
 
     bool philips_tracking { false };
+    bool cm100_tracking { false };
+    bool sony_tracking { false };
     bool mitsumi_tracking;
 };
 

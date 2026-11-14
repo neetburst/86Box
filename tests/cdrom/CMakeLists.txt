@@ -1,4 +1,87 @@
 if(BUILD_TESTING)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(MCN_SNDFILE REQUIRED IMPORTED_TARGET sndfile)
+    find_package(ZLIB REQUIRED)
+    add_executable(cdrom_mcn_tests
+        cdrom_mcn_test.cpp
+        ../../src/cdrom/cdrom.c
+        ../../src/cdrom/cdrom_image.c
+        ../../src/utils/crc.c
+        ../../src/utils/crc32.c
+        ../../src/utils/mdsx_dll.c
+    )
+    target_compile_definitions(cdrom_mcn_tests PRIVATE IS_TEST)
+    target_include_directories(cdrom_mcn_tests PRIVATE
+        ${PROJECT_SOURCE_DIR}/src/include ${PROJECT_BINARY_DIR}/src/include
+        ${PROJECT_SOURCE_DIR}/src/cpu)
+    target_compile_definitions(cdrom_mcn_tests PRIVATE
+        $<$<PLATFORM_ID:Linux>:_LARGEFILE64_SOURCE>)
+    target_compile_options(cdrom_mcn_tests PRIVATE
+        $<$<C_COMPILER_ID:MSVC>:/Gy;/Gw>
+        $<$<C_COMPILER_ID:GNU,Clang,AppleClang>:-ffunction-sections;-fdata-sections>)
+    target_link_options(cdrom_mcn_tests PRIVATE
+        $<$<CXX_COMPILER_ID:MSVC>:/OPT:REF>
+        $<$<PLATFORM_ID:Darwin>:-Wl,-dead_strip>
+        $<$<AND:$<NOT:$<PLATFORM_ID:Darwin>>,$<CXX_COMPILER_ID:GNU,Clang>>:-Wl,--gc-sections>)
+    target_link_libraries(cdrom_mcn_tests PRIVATE
+        GTest::gtest_main PkgConfig::MCN_SNDFILE ZLIB::ZLIB)
+    include(GoogleTest)
+    gtest_discover_tests(cdrom_mcn_tests)
+
+    # Skipped at run time unless libaaruformat.so can be loaded.
+    if(UNIX)
+        add_executable(cdrom_burn_tests
+            cdrom_burn_test.cpp
+            cdrom_burn_drive_test.cpp
+            ../../src/cdrom/cdrom.c
+            ../../src/scsi/scsi_cdrom.c
+            ../../src/cdrom/cdrom_aaru.c
+            ../../src/cdrom/cdrom_image_writable.c
+            ../../src/utils/crc.c
+            ../../src/utils/crc32.c
+        )
+        target_include_directories(cdrom_burn_tests PRIVATE
+            ${PROJECT_SOURCE_DIR}/src/include ${PROJECT_BINARY_DIR}/src/include
+            ${PROJECT_SOURCE_DIR}/src/cpu)
+        target_compile_definitions(cdrom_burn_tests PRIVATE
+            $<$<PLATFORM_ID:Linux>:_LARGEFILE64_SOURCE>)
+        target_compile_options(cdrom_burn_tests PRIVATE -ffunction-sections -fdata-sections)
+        target_link_options(cdrom_burn_tests PRIVATE
+            $<$<PLATFORM_ID:Darwin>:-Wl,-dead_strip>
+            $<$<NOT:$<PLATFORM_ID:Darwin>>:-Wl,--gc-sections>)
+        target_link_libraries(cdrom_burn_tests PRIVATE GTest::gtest_main ${CMAKE_DL_LIBS})
+        include(GoogleTest)
+        gtest_discover_tests(cdrom_burn_tests)
+    endif()
+
+    add_executable(sony_cdrom_tests cdrom_sony_test.cpp ../../src/cdrom/cdrom_sony.c)
+    target_include_directories(sony_cdrom_tests PRIVATE ${PROJECT_SOURCE_DIR}/src/include ${PROJECT_BINARY_DIR}/src/include)
+    target_link_libraries(sony_cdrom_tests PRIVATE GTest::gtest_main)
+    include(GoogleTest)
+    gtest_discover_tests(sony_cdrom_tests)
+
+    add_executable(cm100_core_tests
+        cm100_core_test.c
+        ../../src/cdrom/cm100.c
+        ../../src/cdrom/cm100_protocol.c
+        ../../src/cdrom/cm100_datapath.c
+    )
+    target_include_directories(cm100_core_tests PRIVATE ${PROJECT_SOURCE_DIR}/src/include)
+    add_test(NAME CM100.Core COMMAND cm100_core_tests)
+
+    add_executable(cm153_uart_tests
+        cm153_uart_test.c
+        ../../src/cdrom/cm153_uart.c
+        ../../src/cdrom/cm100.c
+        ../../src/cdrom/cm100_protocol.c
+        ../../src/cdrom/cm100_datapath.c
+    )
+    target_include_directories(cm153_uart_tests PRIVATE
+        ${PROJECT_SOURCE_DIR}/src/include
+        ${PROJECT_SOURCE_DIR}/src/cdrom
+    )
+    add_test(NAME CM153.UART COMMAND cm153_uart_tests)
+
     add_executable(philips_cdrom_tests cdrom_philips_test.cpp ../../src/cdrom/cdrom_philips.c)
     target_include_directories(philips_cdrom_tests PRIVATE ${PROJECT_SOURCE_DIR}/src/include ${PROJECT_BINARY_DIR}/src/include)
     target_link_libraries(philips_cdrom_tests PRIVATE GTest::gtest_main)
@@ -33,20 +116,21 @@ if(BUILD_TESTING)
     add_executable(mitsumi_cdrom_tests
         cdrom_mitsumi_test.cpp
     )
-
+    target_compile_definitions(mitsumi_cdrom_tests PRIVATE IS_TEST)
     target_include_directories(mitsumi_cdrom_tests PRIVATE
-        ${PROJECT_SOURCE_DIR}/src/include
-        ${PROJECT_SOURCE_DIR}/src/cpu
-        ${PROJECT_BINARY_DIR}/src/include
-    )
+            ${PROJECT_SOURCE_DIR}/src/include ${PROJECT_BINARY_DIR}/src/include
+            ${PROJECT_SOURCE_DIR}/src/cpu)
+    target_compile_definitions(mitsumi_cdrom_tests PRIVATE
+            $<$<PLATFORM_ID:Linux>:_LARGEFILE64_SOURCE>)
     target_compile_options(mitsumi_cdrom_tests PRIVATE
-        $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-ffunction-sections;-fdata-sections>
-    )
+            $<$<C_COMPILER_ID:MSVC>:/Gy;/Gw>
+            $<$<C_COMPILER_ID:GNU,Clang,AppleClang>:-ffunction-sections;-fdata-sections>)
     target_link_options(mitsumi_cdrom_tests PRIVATE
-        $<$<PLATFORM_ID:Darwin>:-Wl,-dead_strip>
-        $<$<AND:$<NOT:$<PLATFORM_ID:Darwin>>,$<CXX_COMPILER_ID:GNU,Clang>>:-Wl,--gc-sections>
-    )
-    target_link_libraries(mitsumi_cdrom_tests PRIVATE GTest::gtest_main)
+            $<$<CXX_COMPILER_ID:MSVC>:/OPT:REF>
+            $<$<PLATFORM_ID:Darwin>:-Wl,-dead_strip>
+            $<$<AND:$<NOT:$<PLATFORM_ID:Darwin>>,$<CXX_COMPILER_ID:GNU,Clang>>:-Wl,--gc-sections>)
+    target_link_libraries(mitsumi_cdrom_tests PRIVATE
+            GTest::gtest_main PkgConfig::MCN_SNDFILE ZLIB::ZLIB)
 
     include(GoogleTest)
     gtest_discover_tests(mitsumi_cdrom_tests)

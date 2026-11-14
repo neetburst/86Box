@@ -4,6 +4,7 @@
 #include <SDL3/SDL.h>
 #endif
 
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -22,6 +23,7 @@
 #include <86box/hdd.h>
 #include <86box/path.h>
 #include <86box/plat.h>
+#include <86box/runctl.h>
 #include <86box/ui.h>
 #include <86box/version.h>
 #include "cpu.h"
@@ -190,6 +192,8 @@ plat_get_string(int i)
             return "Unable to load image \"%s\": libaaruformat.so is missing, which is required for Aaru format image support.";
         case STRING_CDROM_DVD_IN_CD_DRIVE:
             return "The DVD image \"%s\" has been inserted into a drive that does not support DVD media and will be ignored.";
+        case STRING_CDROM_IMAGE_TOO_LARGE:
+            return "The image \"%s\" exceeds the maximum capacity of this drive and will be ignored.";
         case STRING_CHARDEV_CONNECT_ERROR:
             return "%s: Could not connect to %s: %s";
         case STRING_CHARDEV_CREATE_ERROR:
@@ -200,6 +204,46 @@ plat_get_string(int i)
             return "%s: Virtual console already in use by %s";
         case STRING_CHARDEV_TERMINAL_ERROR:
             return "%s: Could not create terminal: %s";
+        case STRING_USB_NO_PORT:
+            return "%s was not connected: every USB port of this machine is in use.";
+        case STRING_USB_NO_CONTROLLER:
+            return "%s was not connected: this machine has no USB controller that can take devices.";
+#ifdef USE_VFIO
+        case STRING_VFIO_NO_CONTAINER:
+            return "VFIO: Could not open /dev/vfio/vfio: %s. Make sure the vfio-pci module is loaded.";
+        case STRING_VFIO_INVALID_LOCATION:
+            return "VFIO %s: Invalid device location.";
+        case STRING_VFIO_DEVICE_NOT_FOUND:
+            return "VFIO %s: Device not found.";
+        case STRING_VFIO_NO_IOMMU_GROUP:
+            return "VFIO %s: Device has no IOMMU group. Make sure VT-d or IOMMU is enabled on your system.";
+        case STRING_VFIO_NOT_BOUND:
+            return "VFIO %s: Device is not bound to vfio-pci.";
+        case STRING_VFIO_GROUP_OPEN_ERROR:
+            return "VFIO %s: Could not open IOMMU group %d: %s";
+        case STRING_VFIO_GROUP_NOT_VIABLE:
+            return "VFIO %s: IOMMU group %d is not viable. All devices in the group must be bound to vfio-pci.";
+        case STRING_VFIO_DMA_ERROR:
+            return "VFIO: Could not map guest memory for DMA: %s. The locked memory limit (ulimit -l) may be too low.";
+        case STRING_VFIO_ROM_FILE_FALLBACK:
+            return "VFIO %s: Could not read ROM file \"%s\"; using the device's own ROM.";
+        case STRING_VFIO_ROM_FILE_DISABLED:
+            return "VFIO %s: Could not read ROM file \"%s\"; the ROM is disabled.";
+        case STRING_VFIO_ROM_INVALID:
+            return "VFIO %s: The ROM looks invalid. A custom ROM can be loaded through the VFIO settings.";
+        case STRING_VFIO_SETUP_QUESTION:
+            return "VFIO: These devices must be bound to vfio-pci, which requires administrator rights:\n\n%s\nBind them now?";
+        case STRING_VFIO_SETUP_ACCESS:
+            return "VFIO: Administrator rights are required to give 86Box access to the passed-through devices. Continue?";
+        case STRING_VFIO_SETUP_GROUP:
+            return "These devices were not selected, but share an IOMMU group with a selected device, so they will be bound as well:";
+        case STRING_VFIO_SETUP_REFUSED:
+            return "VFIO %s: IOMMU group %d also contains %s, which the host needs. The group will not be bound to vfio-pci.";
+        case STRING_VFIO_SETUP_FAILED:
+            return "VFIO: Could not prepare the devices for passthrough:\n%s";
+        case STRING_VFIO_SETUP_MANUAL:
+            return "VFIO: Administrator rights could not be requested. To prepare the devices for passthrough, run this command, then hard reset:\n\n%s";
+#endif
     }
     return "";
 }
@@ -381,6 +425,23 @@ plat_get_ticks(void)
     return (uint32_t) (plat_get_ticks_common() / 1000);
 }
 
+uint64_t
+plat_get_ns(void)
+{
+    static uint64_t start;
+    static uint64_t freq;
+
+    if (!freq) {
+        start = SDL_GetPerformanceCounter();
+        freq  = SDL_GetPerformanceFrequency();
+    }
+
+    const uint64_t t = SDL_GetPerformanceCounter() - start;
+
+    /* Split, so t * 1e9 can't overflow. */
+    return ((t / freq) * 1000000000ULL) + (((t % freq) * 1000000000ULL) / freq);
+}
+
 void
 plat_delay_ms(uint32_t count)
 {
@@ -404,23 +465,30 @@ plat_power_off(void)
        run before the main thread is terminated */
     cycles -= 99999999;
 
-    cpu_thread_run = 0;
+    runctl_request_stop();
 }
 
+/* Run state changes (runctl.h): mark the title while paused. */
 void
-plat_pause(int p)
+ui_notify(int what)
 {
     static char oldtitle[512];
+    static int  was_paused = 0;
     char        title[512];
 
-    if ((!!p) == dopause)
+    if (what == UI_NOTIFY_SPEED) {
+        ui_emu_status(runctl_speed());
+        return;
+    }
+    if (what != UI_NOTIFY_RUN_STATE)
         return;
 
-    if ((p == 0) && (time_sync & TIME_SYNC_ENABLED))
-        nvr_time_sync();
+    const int paused = (runctl_state() == RUN_PAUSED);
+    if (paused == was_paused)
+        return;
+    was_paused = paused;
 
-    do_pause(p);
-    if (p) {
+    if (paused) {
         strncpy(oldtitle, ui_window_title(NULL), sizeof(oldtitle) - 1);
         strcpy(title, oldtitle);
         strcat(title, " - PAUSED");

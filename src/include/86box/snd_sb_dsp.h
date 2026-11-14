@@ -32,10 +32,6 @@
 #define IS_AZTECH(dsp)     ((dsp)->sb_subtype == SB_SUBTYPE_CLONE_AZT2320_0X13 || (dsp)->sb_subtype == SB_SUBTYPE_CLONE_AZT2316R_0X12 || (dsp)->sb_subtype == SB_SUBTYPE_CLONE_AZT2316A_0X11 || (dsp)->sb_subtype == SB_SUBTYPE_CLONE_AZT1605_0X0C || (dsp)->sb_subtype == SB_SUBTYPE_CLONE_AZTPR16_0X09) /* check for future AZT cards here */
 #define AZTECH_EEPROM_SIZE 36
 
-/* MediaVision related */
-#define IS_MV201(dsp)  ((dsp)->sb_subtype == SB_SUBTYPE_MVD201)
-#define IS_MV1216(dsp) ((dsp)->sb_subtype == SB_SUBTYPE_MVD1216)
-
 typedef struct sb_dsp_t {
     int   sb_type;
     int   sb_subtype; /* which clone */
@@ -116,6 +112,7 @@ typedef struct sb_dsp_t {
 
     int sbleftright;
     int sbleftright_default;
+    int sbleftrighti;
 
     int     sbreset;
     uint8_t sbreaddat;
@@ -156,6 +153,7 @@ typedef struct sb_dsp_t {
     uint16_t sb_addr;
 
     int stereo;
+    int stereoi;
 
     int asp_data_len;
 
@@ -196,10 +194,27 @@ typedef struct sb_dsp_t {
     uint8_t  ess_reload_len;
     uint32_t ess_dma_counter;
     uint8_t  ess_input_gain;
+    uint8_t  ess_input_gain_l;
+    uint8_t  ess_input_gain_r;
 
     /* IRQ status flags (0x22C) */
     uint8_t  ess_irq_generic;
     uint8_t  ess_irq_dmactr;
+    uint8_t  ess_irq_fifohe;
+
+    /* the Audio 1 FIFO as seen by Extended mode programmed I/O (Audio_Base+Fh). While
+       it is in use the DMA hooks point at it, the card's own ones saved here. */
+    uint8_t  ess_fifo[256];
+    uint8_t  ess_fifo_rp;
+    uint8_t  ess_fifo_wp;
+    uint16_t ess_fifo_count;
+    uint8_t  ess_fifo_he;
+    uint8_t  ess_pio;
+    int    (*ess_pio_saved_readb)(void *priv);
+    int    (*ess_pio_saved_readw)(void *priv);
+    int    (*ess_pio_saved_writeb)(void *priv, uint8_t val);
+    int    (*ess_pio_saved_writew)(void *priv, uint16_t val);
+    void    *ess_pio_saved_priv;
 
     /* ESPCM */
     fifo64_t *espcm_fifo;
@@ -235,6 +250,18 @@ typedef struct sb_dsp_t {
 
     mpu_t *mpu;
 } sb_dsp_t;
+
+static inline int
+IS_MV201(const sb_dsp_t *dsp)
+{
+    return dsp->sb_subtype == SB_SUBTYPE_MVD201;
+}
+
+static inline int
+IS_MV1216(const sb_dsp_t *dsp)
+{
+    return dsp->sb_subtype == SB_SUBTYPE_MVD1216;
+}
 
 extern void sb_dsp_input_msg(void *priv, uint8_t *msg, uint32_t len);
 

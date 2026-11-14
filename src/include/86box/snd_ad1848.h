@@ -81,7 +81,9 @@ typedef struct ad1848_t {
     int     adpcm_pos;
 
     uint8_t  dma_ff;
+    uint8_t  rec_dma_ff;
     uint32_t dma_data;
+    uint16_t rec_dma_data;
 
     pc_timer_t timer_count;
     pc_timer_t rec_timer_count;
@@ -96,6 +98,23 @@ typedef struct ad1848_t {
     pc_timer_t fifo_play_timer;
 
 
+    int     record_pos_read;
+    int     record_pos_write_mic;
+    int     record_phase_mic;
+    int     record_denom_mic;
+    int     record_rate_mic;
+    int32_t record_prev_l_mic;
+    int32_t record_prev_r_mic;
+    int     record_prev_valid_mic;
+    int     record_aa_active_mic;
+    double  record_aa_b0_mic;
+    double  record_aa_b1_mic;
+    double  record_aa_b2_mic;
+    double  record_aa_a1_mic;
+    double  record_aa_a2_mic;
+    double  record_aa_z1_mic[2];
+    double  record_aa_z2_mic[2];
+    int16_t record_buffer[0x10000];
     int16_t buffer[SOUNDBUFLEN * 2];
     int     pos;
 
@@ -117,6 +136,7 @@ extern void ad1848_speed_changed(ad1848_t *ad1848);
 extern void ad1848_set_cd_audio_channel(void *priv, int channel);
 extern void ad1848_filter_cd_audio(int channel, double *buffer, void *priv);
 extern void ad1848_filter_channel(void* priv, int channel, double* out_l, double* out_r);
+extern void ad1848_update_cd_vol(ad1848_t *ad1848);
 
 extern void ad1848_init(ad1848_t *ad1848, uint8_t type);
 

@@ -25,6 +25,7 @@
 #include <cstdio>
 
 #include <mutex>
+#include <chrono>
 #include <thread>
 #include <memory>
 #include <algorithm>
@@ -153,9 +154,7 @@ extern "C" {
 #include <86box/hdc_ide.h>
 #include <86box/hdd.h>
 #include <86box/ui.h>
-#ifdef DISCORD
-#    include <86box/discord.h>
-#endif
+#include <86box/runctl.h>
 
 #include "../cpu/cpu.h"
 #include <86box/plat.h>
@@ -199,7 +198,7 @@ do_start(void)
 void
 do_stop(void)
 {
-    cpu_thread_run = 0;
+    runctl_request_stop();
 #if 0
     main_window->close();
 #endif
@@ -233,6 +232,12 @@ uint32_t
 plat_get_ticks(void)
 {
     return elapsed_timer.elapsed();
+}
+
+uint64_t
+plat_get_ns(void)
+{
+    return elapsed_timer.nsecsElapsed();
 }
 
 uint64_t
@@ -745,60 +750,107 @@ exit_pause(void)
 }
 #endif
 
-void
-plat_pause(int p)
+#ifdef Q_OS_LINUX
+/* libgamemode up to 1.8.1 aborts the process (dbus_connection_unref(NULL) is
+   fatal in libdbus) if it cannot connect to the session bus, which is the case
+   under sudo, so only use it if a session bus can be found like libdbus would. */
+static bool
+gamemode_session_bus_available(void)
 {
-    if (!cpu_thread_running && p == 1) {
-        p = 2;
+    struct stat st;
+    char        path[4096];
+
+    /* sudo/su: the session bus belongs to another user */
+    if ((geteuid() == 0) || (geteuid() != getuid()))
+        return false;
+
+    const char *addr = getenv("DBUS_SESSION_BUS_ADDRESS");
+    if (addr && addr[0]) {
+        /* A unix:path= address must point to an existing socket. Other
+           transports (abstract sockets, TCP) cannot be checked cheaply. */
+        const char *addr_path = strstr(addr, "unix:path=");
+        if (!addr_path)
+            return true;
+        addr_path += 10;
+        size_t len = strcspn(addr_path, ",;");
+        if (len >= sizeof(path))
+            return false;
+        memcpy(path, addr_path, len);
+        path[len] = '\0';
+        return (stat(path, &st) == 0) && S_ISSOCK(st.st_mode);
     }
 
-    if ((!!p) == dopause) {
-        QTimer::singleShot(0, main_window, &MainWindow::updateUiPauseState);
-
-#ifdef Q_OS_WINDOWS
-        if (source_hwnd)
-            PostMessage((HWND) (uintptr_t) source_hwnd, WM_SENDSTATUS, (WPARAM) !!p, (LPARAM) (HWND) main_window->winId());
+    /* Without an address, libdbus looks for $XDG_RUNTIME_DIR/bus owned by us. */
+    const char *runtime_dir = getenv("XDG_RUNTIME_DIR");
+    if (!runtime_dir || !runtime_dir[0])
+        return false;
+    snprintf(path, sizeof(path), "%s/bus", runtime_dir);
+    return (lstat(path, &st) == 0) && S_ISSOCK(st.st_mode) && (st.st_uid == getuid());
+}
 #endif
-        return;
-    }
 
-    if ((p == 0) && (time_sync & TIME_SYNC_ENABLED))
-        nvr_time_sync();
+/* Host-side reactions to a run state change (runctl.h), on the GUI thread. */
+static void
+run_state_changed(void)
+{
+    static bool was_paused = false;
+    const bool  paused     = (runctl_state() == RUN_PAUSED);
+
+    if (paused != was_paused) {
+        was_paused = paused;
 
 #if defined(Q_OS_WINDOWS) || defined(Q_OS_MACOS)
-    if (p)
-        enter_pause();
-    else
-        exit_pause();
+        if (paused)
+            enter_pause();
+        else
+            exit_pause();
 #endif
 
 #ifdef Q_OS_LINUX
-    if (p)
-        gamemode_request_end();
-    else
-        gamemode_request_start();
+        static const bool gamemode_available = gamemode_session_bus_available();
+        if (gamemode_available) {
+            if (paused)
+                gamemode_request_end();
+            else
+                gamemode_request_start();
+        }
 #endif
 
-    do_pause(p);
-    if (p) {
-        if (mouse_capture)
+        if (paused && mouse_capture)
             plat_mouse_capture(0);
+
+        QString title      = main_window->getTitle();
+        QString pausedText = QObject::tr(" - PAUSED");
+        if (title.contains(pausedText))
+            title = title.left(title.indexOf(pausedText));
+        emit main_window->setTitle(paused ? title.append(pausedText) : title);
     }
 
-    QString title      = main_window->getTitle();
-    QString pausedText = QObject::tr(" - PAUSED");
-    emit main_window->setTitle(p ? title.append(pausedText) : title.left(title.indexOf(pausedText)));
-
-#ifdef DISCORD
-    discord_update_activity(dopause);
-#endif
-
-    QTimer::singleShot(0, main_window, &MainWindow::updateUiPauseState);
+    main_window->updateUiPauseState();
+    main_window->updateUiFastForwardState();
 
 #ifdef Q_OS_WINDOWS
     if (source_hwnd)
-        PostMessage((HWND) (uintptr_t) source_hwnd, WM_SENDSTATUS, (WPARAM) !!p, (LPARAM) (HWND) main_window->winId());
+        PostMessage((HWND) (uintptr_t) source_hwnd, WM_SENDSTATUS, (WPARAM) paused, (LPARAM) (HWND) main_window->winId());
 #endif
+}
+
+void
+ui_notify(int what)
+{
+    if (!main_window)
+        return;
+
+    switch (what) {
+        case UI_NOTIFY_RUN_STATE:
+            QMetaObject::invokeMethod(main_window, [] { run_state_changed(); }, Qt::QueuedConnection);
+            break;
+        case UI_NOTIFY_SPEED:
+            QMetaObject::invokeMethod(main_window, [] { ui_emu_status(runctl_speed()); }, Qt::QueuedConnection);
+            break;
+        default:
+            break;
+    }
 }
 
 void
@@ -815,7 +867,7 @@ plat_power_off(void)
        run before the main thread is terminated */
     cycles -= 99999999;
 
-    cpu_thread_run = 0;
+    runctl_request_stop();
     QTimer::singleShot(0, (const QWidget *) main_window, &QMainWindow::close);
 }
 
@@ -878,6 +930,25 @@ startblit()
     }
 
     blitmx.lock();
+}
+
+/* startblit(), but giving up after timeout_ms; nonzero if the lock is held.
+   For the UI thread, which must not wait on an emulation thread that may
+   itself be waiting on the UI thread. */
+int
+startblit_timeout(int timeout_ms)
+{
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+
+    blitmx_contention++;
+    do {
+        if (blitmx.try_lock())
+            return 1;
+        std::this_thread::yield();
+    } while (std::chrono::steady_clock::now() < deadline);
+    blitmx_contention--;
+
+    return 0;
 }
 
 void
@@ -1002,11 +1073,33 @@ Preferences::reloadStrings()
     translatedstrings[STRING_CDROM_LOAD_MDSX_ERROR]     = QCoreApplication::translate("", "Unable to load image \"%s\": %1 is missing, which is required for Daemon Tools MDS v2 and MDX image support.").arg(LIB_NAME_MDSX).toUtf8();
     translatedstrings[STRING_CDROM_LOAD_AARU_ERROR]     = QCoreApplication::translate("", "Unable to load image \"%s\": %1 is missing, which is required for Aaru format image support.").arg(LIB_NAME_AARU).toUtf8();
     translatedstrings[STRING_CDROM_DVD_IN_CD_DRIVE]     = QCoreApplication::translate("", "The DVD image \"%s\" has been inserted into a drive that does not support DVD media and will be ignored.").toUtf8();
+    translatedstrings[STRING_CDROM_IMAGE_TOO_LARGE]     = QCoreApplication::translate("", "The image \"%s\" exceeds the maximum capacity of this drive and will be ignored.").toUtf8();
     translatedstrings[STRING_CHARDEV_CONNECT_ERROR]     = QCoreApplication::translate("", "%s: Could not connect to %s: %s").toUtf8();
     translatedstrings[STRING_CHARDEV_CREATE_ERROR]      = QCoreApplication::translate("", "%s: Could not create %s: %s").toUtf8();
     translatedstrings[STRING_CHARDEV_ATTACHED]          = QCoreApplication::translate("", "%s: Attached to %s").toUtf8();
     translatedstrings[STRING_CHARDEV_VCON_IN_USE]       = QCoreApplication::translate("", "%s: Virtual console already in use by %s").toUtf8();
     translatedstrings[STRING_CHARDEV_TERMINAL_ERROR]    = QCoreApplication::translate("", "%s: Could not create terminal: %s").toUtf8();
+    translatedstrings[STRING_USB_NO_PORT]               = QCoreApplication::translate("", "%s was not connected: every USB port of this machine is in use.").toUtf8();
+    translatedstrings[STRING_USB_NO_CONTROLLER]         = QCoreApplication::translate("", "%s was not connected: this machine has no USB controller that can take devices.").toUtf8();
+#ifdef USE_VFIO
+    translatedstrings[STRING_VFIO_NO_CONTAINER]         = QCoreApplication::translate("", "VFIO: Could not open /dev/vfio/vfio: %s. Make sure the vfio-pci module is loaded.").toUtf8();
+    translatedstrings[STRING_VFIO_INVALID_LOCATION]     = QCoreApplication::translate("", "VFIO %s: Invalid device location.").toUtf8();
+    translatedstrings[STRING_VFIO_DEVICE_NOT_FOUND]     = QCoreApplication::translate("", "VFIO %s: Device not found.").toUtf8();
+    translatedstrings[STRING_VFIO_NO_IOMMU_GROUP]       = QCoreApplication::translate("", "VFIO %s: Device has no IOMMU group. Make sure VT-d or IOMMU is enabled on your system.").toUtf8();
+    translatedstrings[STRING_VFIO_NOT_BOUND]            = QCoreApplication::translate("", "VFIO %s: Device is not bound to vfio-pci.").toUtf8();
+    translatedstrings[STRING_VFIO_GROUP_OPEN_ERROR]     = QCoreApplication::translate("", "VFIO %s: Could not open IOMMU group %d: %s").toUtf8();
+    translatedstrings[STRING_VFIO_GROUP_NOT_VIABLE]     = QCoreApplication::translate("", "VFIO %s: IOMMU group %d is not viable. All devices in the group must be bound to vfio-pci.").toUtf8();
+    translatedstrings[STRING_VFIO_DMA_ERROR]            = QCoreApplication::translate("", "VFIO: Could not map guest memory for DMA: %s. The locked memory limit (ulimit -l) may be too low.").toUtf8();
+    translatedstrings[STRING_VFIO_ROM_FILE_FALLBACK]    = QCoreApplication::translate("", "VFIO %s: Could not read ROM file \"%s\"; using the device's own ROM.").toUtf8();
+    translatedstrings[STRING_VFIO_ROM_FILE_DISABLED]    = QCoreApplication::translate("", "VFIO %s: Could not read ROM file \"%s\"; the ROM is disabled.").toUtf8();
+    translatedstrings[STRING_VFIO_ROM_INVALID]          = QCoreApplication::translate("", "VFIO %s: The ROM looks invalid. A custom ROM can be loaded through the VFIO settings.").toUtf8();
+    translatedstrings[STRING_VFIO_SETUP_QUESTION]      = QCoreApplication::translate("", "VFIO: These devices must be bound to vfio-pci, which requires administrator rights:\n\n%s\nBind them now?").toUtf8();
+    translatedstrings[STRING_VFIO_SETUP_ACCESS]        = QCoreApplication::translate("", "VFIO: Administrator rights are required to give 86Box access to the passed-through devices. Continue?").toUtf8();
+    translatedstrings[STRING_VFIO_SETUP_GROUP]         = QCoreApplication::translate("", "These devices were not selected, but share an IOMMU group with a selected device, so they will be bound as well:").toUtf8();
+    translatedstrings[STRING_VFIO_SETUP_REFUSED]       = QCoreApplication::translate("", "VFIO %s: IOMMU group %d also contains %s, which the host needs. The group will not be bound to vfio-pci.").toUtf8();
+    translatedstrings[STRING_VFIO_SETUP_FAILED]        = QCoreApplication::translate("", "VFIO: Could not prepare the devices for passthrough:\n%s").toUtf8();
+    translatedstrings[STRING_VFIO_SETUP_MANUAL]        = QCoreApplication::translate("", "VFIO: Administrator rights could not be requested. To prepare the devices for passthrough, run this command, then hard reset:\n\n%s").toUtf8();
+#endif
 }
 
 char *

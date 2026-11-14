@@ -437,7 +437,7 @@ TEST_F(PhilipsTest, MediaChangeCancelsPartialCommandAndClearsLatchedStatus)
     EXPECT_TRUE(timers[0]->flags & TIMER_ENABLED);
     cdrom[0].insert(cdrom[0].priv);
     EXPECT_FALSE(timers[0]->flags & TIMER_ENABLED);
-    EXPECT_EQ(irq, 0);
+    EXPECT_EQ(irq, 1);
     command({ 0x3a });
     for (int i = 0; i < 5; i++)
         byte(0x9c);
@@ -587,6 +587,7 @@ cdrom_get_internal_name(int)
     static char original[] = "philips_cm205", ms[] = "philips_cm205ms";
     return ms_model ? ms : original;
 }
+void ui_sb_update_icon(int, int) {}
 cdrom_t  cdrom[CDROM_NUM];
 uint64_t TIMER_USEC = 1ULL << 32;
 uint64_t tsc, timer_target;

@@ -50,6 +50,7 @@
 #define MOUSE_RELEASE_MIDDLE 0x04 /* Middle button */
 #define MOUSE_RELEASE_THUMB  0x18 /* Thumb buttons (buttons 4 and 5) */
 
+struct serial_backend_s;
 
 #ifdef __cplusplus
 extern "C" {
@@ -60,6 +61,7 @@ extern int    tablet_type;
 extern int    mouse_input_mode_initial;
 extern int    mouse_input_mode; /* 2 = Absolute (Visible Crosshair), 1 = Absolute, 0 = Relative */
 extern int    mouse_timed; /* 1 = Timed, 0 = Constant */
+extern int    mouse_automation; /* input injected by the automation socket */
 extern int    mouse_tablet_in_proximity;
 extern double mouse_x_abs;
 extern double mouse_y_abs;
@@ -81,6 +83,8 @@ extern const device_t mouse_msserial_device;
 extern const device_t mouse_msserial_ballpoint_device;
 extern const device_t mouse_ltserial_device;
 extern const device_t mouse_ps2_device;
+extern const device_t mouse_usb_device;
+extern const device_t tablet_usb_device;
 extern const device_t mouse_upc_device;
 extern const device_t mouse_upc_standalone_device;
 extern const device_t mouse_pxl_380_device;
@@ -92,6 +96,8 @@ extern const device_t mouse_mtouch_device;
 /* The IBM 7690 optical touch panel at interface-adapter ports F300h-F303h. */
 extern const device_t mouse_ibm7690_touch_device;
 extern const device_t mouse_cga_lightpen_device;
+/* DEC VAXmate three-button Digital mouse on the SCN2661 USART. */
+extern const device_t vaxmate_mouse_device;
 #endif
 
 extern int             mouse_both_enabled(void);
@@ -122,6 +128,7 @@ extern void            mouse_subtract_w(int *delta_w, int min, int max, int inve
 extern void            mouse_set_buttons_ex(int b);
 extern int             mouse_get_buttons_ex(void);
 extern int             tablet_get_buttons_ex(void);
+extern int             tablet_take_pressed(void);
 extern void            mouse_set_sample_rate(double new_rate);
 extern void            mouse_update_sample_rate(void);
 extern void            mouse_set_buttons(int buttons);
@@ -150,10 +157,12 @@ extern void            mouse_init(void);
 
 extern void            mouse_bus_set_irq(void *priv, int irq);
 
+extern void            mouse_upc_set_irq(int num, uint16_t irq, void *priv);
 extern void            mouse_upc_port_handler(int num, int set, uint16_t port, void *priv);
 extern void            mouse_upc_handler(int set, uint16_t port, void *priv);
 
-extern void            mouse_upc_set_irq(int num, uint16_t irq, void *priv);
+/* The USART the VAXmate mouse hangs on takes it as its backend. */
+extern const struct serial_backend_s *vaxmate_mouse_backend(void);
 
 #ifdef __cplusplus
 }

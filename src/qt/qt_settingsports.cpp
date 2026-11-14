@@ -11,9 +11,9 @@
  * Authors: Joakim L. Gilje <jgilje@jgilje.net>
  *          Cacodemon345
  *
- *          Copyright 2022 Cacodemon345
- *          Copyright 2022 Jasmine Iwanek
- *          Copyright 2021 Joakim L. Gilje
+ *          Copyright 2022      Cacodemon345
+ *          Copyright 2022-2026 Jasmine Iwanek
+ *          Copyright 2021      Joakim L. Gilje
  */
 #include <cstdint>
 #include <cstdio>
@@ -25,10 +25,14 @@ extern "C" {
 #include <86box/device.h>
 #include <86box/machine.h>
 #include <86box/lpt.h>
+#include <86box/mouse.h>
+#include <86box/network.h>
 #include <86box/scsi_device.h>
 #include <86box/scsi_tape.h>
 #include <86box/serial.h>
 #include <86box/char.h>
+#include <86box/mem.h>
+#include <86box/usb.h>
 }
 
 #include "qt_deviceconfig.hpp"
@@ -43,7 +47,49 @@ extern "C" {
 #include "qt_settingsports.hpp"
 #include "ui_qt_settingsports.h"
 
+#include <QSignalBlocker>
 #include <QStandardItem>
+
+static int
+configured_port(const device_t *device, int instance)
+{
+    if (!device)
+        return -1;
+
+    if (instance > 0)
+        device_context_inst(device, instance);
+    else
+        device_context(device);
+
+    const int port = device_get_config_int("port");
+    device_context_restore();
+    return port;
+}
+
+static bool
+port_used_by_network_or_mouse(bool parallel, int port)
+{
+    const uint32_t bus_flag = parallel ? DEVICE_LPT : DEVICE_COM;
+
+    for (int i = 0; i < NET_CARD_MAX; i++) {
+        const device_t *device = network_card_getdevice(net_cards_conf[i].device_num);
+        if (device && (device->flags & bus_flag)
+            && configured_port(device, i + 1) == port)
+            return true;
+    }
+
+    const device_t *mouse_devices[] = {
+        mouse_get_device(mouse_type),
+        tablet_get_device(tablet_type)
+    };
+    for (const device_t *device : mouse_devices) {
+        if (device && (device->flags & bus_flag)
+            && configured_port(device, 0) == port)
+            return true;
+    }
+
+    return false;
+}
 
 SettingsPorts::SettingsPorts(QWidget *parent)
     : QWidget(parent)
@@ -71,6 +117,10 @@ SettingsPorts::~SettingsPorts()
     for (int i = 0; i < SERIAL_MAX_UI; i++)
         delete scCom[i];
 
+    /* The card picked in the dialog no longer applies once it closes; the
+       saved usb_card_type decides which machines have a USB bus again. */
+    usb_card_pending = -1;
+
     delete ui;
 }
 
@@ -88,6 +138,42 @@ SettingsPorts::updateLptPortTracking(int i)
     Harddrives::busTrackClass->device_track(occupied ? 1 : 0, DEV_LPT, TAPE_BUS_LPT, i);
 }
 
+void
+SettingsPorts::updateLptPortControls(int i)
+{
+    auto *checkBox = findChild<QCheckBox *>(QString("checkBoxParallel%1").arg(i + 1));
+    auto *comboBox = findChild<QComboBox *>(QString("comboBoxLpt%1").arg(i + 1));
+    auto *buttonCfg = findChild<QPushButton *>(QString("pushButtonConfigureLpt%1").arg(i + 1));
+    if (!checkBox || !comboBox)
+        return;
+
+    const bool enabled = checkBox->isChecked();
+    comboBox->setEnabled(enabled && comboBox->model()->rowCount() > 1
+                         && !port_used_by_network_or_mouse(true, i));
+    if (buttonCfg) {
+        const int device = comboBox->currentData().toInt();
+        buttonCfg->setEnabled(enabled && device_has_config(char_get_device(device)));
+    }
+}
+
+void
+SettingsPorts::updateComPortControls(int i)
+{
+    auto *checkBox = findChild<QCheckBox *>(QString("checkBoxSerial%1").arg(i + 1));
+    auto *comboBox = findChild<QComboBox *>(QString("comboBoxCom%1").arg(i + 1));
+    auto *buttonCfg = findChild<QPushButton *>(QString("pushButtonConfigureCom%1").arg(i + 1));
+    if (!checkBox || !comboBox)
+        return;
+
+    const bool enabled = checkBox->isChecked();
+    comboBox->setEnabled(enabled && comboBox->model()->rowCount() > 1
+                         && !port_used_by_network_or_mouse(false, i));
+    if (buttonCfg) {
+        const int device = comboBox->currentData().toInt();
+        buttonCfg->setEnabled(enabled && device_has_config(char_get_device(device)));
+    }
+}
+
 int
 SettingsPorts::changed()
 {
@@ -95,6 +181,9 @@ SettingsPorts::changed()
     int soft_changed = 0;
 
     has_changed |= (jumpered_internal_ecp_dma != ui->comboBoxLptECPDMA->currentData().toInt());
+    has_changed |= (usb_card_type != ui->comboBoxUsbCard->currentData().toInt());
+    has_changed |= (usb_hub_type != ui->comboBoxUsbHub->currentData().toInt());
+    has_changed |= (usb_msd_type != ui->comboBoxUsbMsd->currentData().toInt());
 
     for (int i = 0; i < PARALLEL_MAX; i++) {
         auto *checkBox = findChild<QCheckBox *>(QString("checkBoxParallel%1").arg(i + 1));
@@ -168,6 +257,15 @@ SettingsPorts::save(int soft)
         return;
 
     jumpered_internal_ecp_dma = ui->comboBoxLptECPDMA->currentData().toInt();
+    usb_card_type             = ui->comboBoxUsbCard->currentData().toInt();
+    usb_hub_type              = ui->comboBoxUsbHub->currentData().toInt();
+    usb_msd_type              = ui->comboBoxUsbMsd->currentData().toInt();
+}
+
+int
+SettingsPorts::usbMsd() const
+{
+    return (ui->comboBoxUsbMsd->count() > 0) ? ui->comboBoxUsbMsd->currentData().toInt() : usb_msd_type;
 }
 
 /* The character devices, for the parallel and serial port lists alike. */
@@ -274,16 +372,10 @@ SettingsPorts::onCurrentMachineChanged(int machineId)
         cbox[i]->setCurrentIndex(selectedRows[i]);
 
         auto *checkBox  = findChild<QCheckBox *>(QString("checkBoxParallel%1").arg(i + 1));
-        auto *buttonCfg = findChild<QPushButton *>(QString("pushButtonConfigureLpt%1").arg(i + 1));
         if (checkBox != NULL)
             checkBox->setChecked(lpt_ports[i].enabled > 0);
-        if (cbox[i] != NULL) {
-            cbox[i]->setEnabled(lpt_ports[i].enabled > 0);
-            if (buttonCfg != NULL) {
-                int lptDevice = cbox[i]->currentData().toInt();
-                buttonCfg->setEnabled(device_has_config(char_get_device(lptDevice)) && (lpt_ports[i].enabled > 0));
-            }
-        }
+        if (cbox[i] != NULL)
+            updateLptPortControls(i);
 
         updateLptPortTracking(i);
     }
@@ -320,17 +412,141 @@ SettingsPorts::onCurrentMachineChanged(int machineId)
         cbox[i]->setCurrentIndex(selectedRows[i]);
 
         auto *checkBox  = findChild<QCheckBox *>(QString("checkBoxSerial%1").arg(i + 1));
-        auto *buttonCfg = findChild<QPushButton *>(QString("pushButtonConfigureCom%1").arg(i + 1));
         if (checkBox != NULL)
             checkBox->setChecked(com_ports[i].enabled > 0);
-        if (cbox[i] != NULL) {
-            cbox[i]->setEnabled(com_ports[i].enabled > 0);
-            if (buttonCfg != NULL) {
-                int comDevice = cbox[i]->currentData().toInt();
-                buttonCfg->setEnabled(device_has_config(char_get_device(comDevice)) && (com_ports[i].enabled > 0));
-            }
-        }
+        if (cbox[i] != NULL)
+            updateComPortControls(i);
     }
+
+    // USB card: a selection updates the hub list and the other pages, so the
+    // signals are blocked while the list is rebuilt, and only the final
+    // selection counts.
+    auto *usbCardModel   = ui->comboBoxUsbCard->model();
+    auto  removeRowsCard = usbCardModel->rowCount();
+    int   curCard        = (removeRowsCard > 0) ? ui->comboBoxUsbCard->currentData().toInt() : usb_card_type;
+
+    selectedRow = 0;
+    {
+        const QSignalBlocker blockCard(ui->comboBoxUsbCard);
+        Models::Batch        usbCardRows(usbCardModel);
+
+        for (int i = 0; i < usb_card_get_ndev(); ++i) {
+            const device_t *dev = usb_card_get_device(i);
+
+            if (device_is_valid(dev, machineId) == 0)
+                continue;
+
+            int row = usbCardRows.add(DeviceConfig::DeviceName(dev, usb_card_get_internal_name(i), 0), i);
+            if (i == curCard)
+                selectedRow = row - removeRowsCard;
+        }
+        usbCardRows.commit();
+        usbCardModel->removeRows(0, removeRowsCard);
+        ui->comboBoxUsbCard->setEnabled(usbCardModel->rowCount() > 1);
+        ui->comboBoxUsbCard->setCurrentIndex(-1);
+    }
+    ui->comboBoxUsbCard->setCurrentIndex(selectedRow);
+}
+
+/* The hub is a USB device: it is offered only while the machine, or the
+   USB card chosen, has a USB bus. */
+void
+SettingsPorts::updateUsbHubList()
+{
+    auto *usbHubModel   = ui->comboBoxUsbHub->model();
+    auto  removeRowsHub = usbHubModel->rowCount();
+    int   curHub        = (removeRowsHub > 0) ? ui->comboBoxUsbHub->currentData().toInt() : usb_hub_type;
+    int   selectedRow   = 0;
+
+    Models::Batch usbHubRows(usbHubModel);
+    for (int i = 0; i < usb_hub_get_ndev(); ++i) {
+        const device_t *dev = usb_hub_get_device(i);
+
+        if (device_is_valid(dev, machineId) == 0)
+            continue;
+
+        int row = usbHubRows.add(DeviceConfig::DeviceName(dev, usb_hub_get_internal_name(i), 0), i);
+        if (i == curHub)
+            selectedRow = row - removeRowsHub;
+    }
+    usbHubRows.commit();
+    usbHubModel->removeRows(0, removeRowsHub);
+    ui->comboBoxUsbHub->setEnabled(usbHubModel->rowCount() > 1);
+    ui->comboBoxUsbHub->setCurrentIndex(-1);
+    ui->comboBoxUsbHub->setCurrentIndex(selectedRow);
+}
+
+void
+SettingsPorts::on_comboBoxUsbCard_currentIndexChanged(int index)
+{
+    if (index < 0)
+        return;
+
+    usb_card_pending = ui->comboBoxUsbCard->currentData().toInt();
+    updateUsbHubList();
+    updateUsbMsdList();
+    emit usbBusChanged(machineId);
+}
+
+/* USB mass storage is offered like the hub. It holds no drives of its own:
+   they sit on the SCSI bus it bridges, set up on the drive pages, which the
+   two buttons under it open. */
+void
+SettingsPorts::updateUsbMsdList()
+{
+    auto *usbMsdModel   = ui->comboBoxUsbMsd->model();
+    auto  removeRowsMsd = usbMsdModel->rowCount();
+    int   curMsd        = (removeRowsMsd > 0) ? ui->comboBoxUsbMsd->currentData().toInt() : usb_msd_type;
+    int   selectedRow   = 0;
+
+    Models::Batch usbMsdRows(usbMsdModel);
+    for (int i = 0; i < usb_msd_get_ndev(); ++i) {
+        const device_t *dev = usb_msd_get_device(i);
+
+        if (device_is_valid(dev, machineId) == 0)
+            continue;
+
+        int row = usbMsdRows.add(DeviceConfig::DeviceName(dev, usb_msd_get_internal_name(i), 0), i);
+        if (i == curMsd)
+            selectedRow = row - removeRowsMsd;
+    }
+    usbMsdRows.commit();
+    usbMsdModel->removeRows(0, removeRowsMsd);
+    ui->comboBoxUsbMsd->setEnabled(usbMsdModel->rowCount() > 1);
+    ui->comboBoxUsbMsd->setCurrentIndex(-1);
+    ui->comboBoxUsbMsd->setCurrentIndex(selectedRow);
+}
+
+void
+SettingsPorts::on_comboBoxUsbMsd_currentIndexChanged(int index)
+{
+    if (index < 0)
+        return;
+
+    const bool on = (ui->comboBoxUsbMsd->currentData().toInt() > 0);
+
+    ui->labelUsbMsdDrives->setEnabled(on);
+    ui->pushButtonUsbMsdHardDisks->setEnabled(on);
+    ui->pushButtonUsbMsdCdrom->setEnabled(on);
+    ui->pushButtonUsbMsdRemovable->setEnabled(on);
+}
+
+void
+SettingsPorts::on_pushButtonUsbMsdHardDisks_clicked()
+{
+    emit drivePageRequested(DrivePage::HardDisks);
+}
+
+void
+SettingsPorts::on_pushButtonUsbMsdCdrom_clicked()
+{
+    emit drivePageRequested(DrivePage::Cdrom);
+}
+
+void
+SettingsPorts::on_pushButtonUsbMsdRemovable_clicked()
+{
+    emit drivePageRequested(DrivePage::Removable);
 }
 
 void
@@ -339,10 +555,8 @@ SettingsPorts::on_comboBoxLpt1_currentIndexChanged(int index)
     if (index < 0)
         return;
 
-    int lptDevice = ui->comboBoxLpt1->currentData().toInt();
-
     updateLptPortTracking(0);
-    ui->pushButtonConfigureLpt1->setEnabled(ui->comboBoxLpt1->isEnabled() && device_has_config(char_get_device(lptDevice)));
+    updateLptPortControls(0);
 }
 
 void
@@ -360,10 +574,8 @@ SettingsPorts::on_comboBoxLpt2_currentIndexChanged(int index)
     if (index < 0)
         return;
 
-    int lptDevice = ui->comboBoxLpt2->currentData().toInt();
-
     updateLptPortTracking(1);
-    ui->pushButtonConfigureLpt2->setEnabled(ui->comboBoxLpt2->isEnabled() && device_has_config(char_get_device(lptDevice)));
+    updateLptPortControls(1);
 }
 
 void
@@ -381,10 +593,8 @@ SettingsPorts::on_comboBoxLpt3_currentIndexChanged(int index)
     if (index < 0)
         return;
 
-    int lptDevice = ui->comboBoxLpt3->currentData().toInt();
-
     updateLptPortTracking(2);
-    ui->pushButtonConfigureLpt3->setEnabled(ui->comboBoxLpt3->isEnabled() && device_has_config(char_get_device(lptDevice)));
+    updateLptPortControls(2);
 }
 
 void
@@ -402,10 +612,8 @@ SettingsPorts::on_comboBoxLpt4_currentIndexChanged(int index)
     if (index < 0)
         return;
 
-    int lptDevice = ui->comboBoxLpt4->currentData().toInt();
-
     updateLptPortTracking(3);
-    ui->pushButtonConfigureLpt4->setEnabled(ui->comboBoxLpt4->isEnabled() && device_has_config(char_get_device(lptDevice)));
+    updateLptPortControls(3);
 }
 
 void
@@ -420,28 +628,32 @@ SettingsPorts::on_pushButtonConfigureLpt4_clicked()
 void
 SettingsPorts::on_checkBoxParallel1_stateChanged(int state)
 {
-    ui->comboBoxLpt1->setEnabled(state == Qt::Checked);
+    (void) state;
+    updateLptPortControls(0);
     on_comboBoxLpt1_currentIndexChanged(0);
 }
 
 void
 SettingsPorts::on_checkBoxParallel2_stateChanged(int state)
 {
-    ui->comboBoxLpt2->setEnabled(state == Qt::Checked);
+    (void) state;
+    updateLptPortControls(1);
     on_comboBoxLpt2_currentIndexChanged(0);
 }
 
 void
 SettingsPorts::on_checkBoxParallel3_stateChanged(int state)
 {
-    ui->comboBoxLpt3->setEnabled(state == Qt::Checked);
+    (void) state;
+    updateLptPortControls(2);
     on_comboBoxLpt3_currentIndexChanged(0);
 }
 
 void
 SettingsPorts::on_checkBoxParallel4_stateChanged(int state)
 {
-    ui->comboBoxLpt4->setEnabled(state == Qt::Checked);
+    (void) state;
+    updateLptPortControls(3);
     on_comboBoxLpt4_currentIndexChanged(0);
 }
 
@@ -451,9 +663,7 @@ SettingsPorts::on_comboBoxCom1_currentIndexChanged(int index)
     if (index < 0)
         return;
 
-    int comDevice = ui->comboBoxCom1->currentData().toInt();
-
-    ui->pushButtonConfigureCom1->setEnabled(ui->comboBoxCom1->isEnabled() && device_has_config(char_get_device(comDevice)));
+    updateComPortControls(0);
 }
 
 void
@@ -471,9 +681,7 @@ SettingsPorts::on_comboBoxCom2_currentIndexChanged(int index)
     if (index < 0)
         return;
 
-    int comDevice = ui->comboBoxCom2->currentData().toInt();
-
-    ui->pushButtonConfigureCom2->setEnabled(ui->comboBoxCom2->isEnabled() && device_has_config(char_get_device(comDevice)));
+    updateComPortControls(1);
 }
 
 void
@@ -491,9 +699,7 @@ SettingsPorts::on_comboBoxCom3_currentIndexChanged(int index)
     if (index < 0)
         return;
 
-    int comDevice = ui->comboBoxCom3->currentData().toInt();
-
-    ui->pushButtonConfigureCom3->setEnabled(ui->comboBoxCom3->isEnabled() && device_has_config(char_get_device(comDevice)));
+    updateComPortControls(2);
 }
 
 void
@@ -511,9 +717,7 @@ SettingsPorts::on_comboBoxCom4_currentIndexChanged(int index)
     if (index < 0)
         return;
 
-    int comDevice = ui->comboBoxCom4->currentData().toInt();
-
-    ui->pushButtonConfigureCom4->setEnabled(ui->comboBoxCom4->isEnabled() && device_has_config(char_get_device(comDevice)));
+    updateComPortControls(3);
 }
 
 void
@@ -528,27 +732,31 @@ SettingsPorts::on_pushButtonConfigureCom4_clicked()
 void
 SettingsPorts::on_checkBoxSerial1_stateChanged(int state)
 {
-    ui->comboBoxCom1->setEnabled(state == Qt::Checked);
+    (void) state;
+    updateComPortControls(0);
     on_comboBoxCom1_currentIndexChanged(0);
 }
 
 void
 SettingsPorts::on_checkBoxSerial2_stateChanged(int state)
 {
-    ui->comboBoxCom2->setEnabled(state == Qt::Checked);
+    (void) state;
+    updateComPortControls(1);
     on_comboBoxCom2_currentIndexChanged(0);
 }
 
 void
 SettingsPorts::on_checkBoxSerial3_stateChanged(int state)
 {
-    ui->comboBoxCom3->setEnabled(state == Qt::Checked);
+    (void) state;
+    updateComPortControls(2);
     on_comboBoxCom3_currentIndexChanged(0);
 }
 
 void
 SettingsPorts::on_checkBoxSerial4_stateChanged(int state)
 {
-    ui->comboBoxCom4->setEnabled(state == Qt::Checked);
+    (void) state;
+    updateComPortControls(3);
     on_comboBoxCom4_currentIndexChanged(0);
 }

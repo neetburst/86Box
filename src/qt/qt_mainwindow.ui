@@ -89,6 +89,7 @@
     <addaction name="actionToggle_OSD"/>
     <addaction name="separator"/>
     <addaction name="actionFast_forward"/>
+    <addaction name="actionFast_forward_on_start"/>
     <addaction name="actionForce_interpretation"/>
     <addaction name="separator"/>
     <addaction name="actionHard_Reset"/>
@@ -108,14 +109,33 @@
      <property name="title">
       <string>S&amp;ound</string>
      </property>
+     <widget class="QMenu" name="menuMIDI">
+      <property name="title">
+       <string>M&amp;IDI output device</string>
+      </property>
+      <addaction name="separator"/>
+      <addaction name="actionMIDI_restart_device"/>
+     </widget>
+     <widget class="QMenu" name="menuMIDI_command">
+      <property name="title">
+       <string>Send MIDI &amp;command</string>
+      </property>
+      <addaction name="actionMIDI_reset_GM"/>
+      <addaction name="actionMIDI_reset_GS"/>
+      <addaction name="actionMIDI_reset_XG"/>
+      <addaction name="actionMIDI_reset_MT32"/>
+      <addaction name="separator"/>
+      <addaction name="actionMIDI_all_notes_off"/>
+     </widget>
      <addaction name="actionMute_Unmute"/>
      <addaction name="separator"/>
      <addaction name="actionSound_gain"/>
+     <addaction name="separator"/>
+     <addaction name="menuMIDI"/>
+     <addaction name="menuMIDI_command"/>
     </widget>
     <addaction name="actionSettings"/>
     <addaction name="actionUpdate_status_bar_icons"/>
-    <addaction name="separator"/>
-    <addaction name="actionEnable_Discord_integration"/>
     <addaction name="separator"/>
     <addaction name="actionTake_screenshot"/>
     <addaction name="actionTake_raw_screenshot"/>
@@ -130,6 +150,7 @@
     <addaction name="actionEnd_trace"/>
     <addaction name="separator"/>
     <addaction name="actionMCA_devices"/>
+    <addaction name="actionMemory_viewer"/>
     <addaction name="separator"/>
     <addaction name="actionOpen_printer_tray"/>
     <addaction name="actionOpen_screenshots_folder"/>
@@ -178,6 +199,9 @@
      <addaction name="actionFullScreen_keepRatio"/>
      <addaction name="actionFullScreen_int"/>
      <addaction name="actionFullScreen_int43"/>
+     <addaction name="actionFullScreen_int43_vert"/>
+     <addaction name="actionFullScreen_center"/>
+     <addaction name="actionFullScreen_center43"/>
     </widget>
     <widget class="QMenu" name="menuOpenGL_input_stretch_mode">
      <property name="title">
@@ -295,6 +319,14 @@
    <addaction name="actionTake_screenshot"/>
    <addaction name="actionCopy_screenshot"/>
   </widget>
+  <action name="actionFast_forward_on_start">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>Fast forward at &amp;startup</string>
+   </property>
+  </action>
   <action name="actionForce_interpretation">
    <property name="icon">
     <iconset resource="../qt_resources.qrc">
@@ -617,6 +649,30 @@
     <string>4:&amp;3 Integer scale</string>
    </property>
   </action>
+  <action name="actionFullScreen_center">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>&amp;Center</string>
+   </property>
+  </action>
+  <action name="actionFullScreen_center43">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>4:3 Cen&amp;ter</string>
+   </property>
+  </action>
+  <action name="actionFullScreen_int43_vert">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>4:3 Integer scale (&amp;vertical)</string>
+   </property>
+  </action>
   <action name="actionAbout_Qt">
    <property name="text">
     <string>About &amp;Qt</string>
@@ -707,6 +763,36 @@
     <string>Sound &amp;gain…</string>
    </property>
   </action>
+  <action name="actionMIDI_reset_GM">
+   <property name="text">
+    <string>&amp;GM System On</string>
+   </property>
+  </action>
+  <action name="actionMIDI_reset_GS">
+   <property name="text">
+    <string>G&amp;S Reset</string>
+   </property>
+  </action>
+  <action name="actionMIDI_reset_XG">
+   <property name="text">
+    <string>&amp;XG System On</string>
+   </property>
+  </action>
+  <action name="actionMIDI_reset_MT32">
+   <property name="text">
+    <string>&amp;MT-32 Reset</string>
+   </property>
+  </action>
+  <action name="actionMIDI_all_notes_off">
+   <property name="text">
+    <string>All &amp;notes off</string>
+   </property>
+  </action>
+  <action name="actionMIDI_restart_device">
+   <property name="text">
+    <string>Restart &amp;device</string>
+   </property>
+  </action>
   <action name="actionOpenGL">
    <property name="checkable">
     <bool>true</bool>
@@ -724,14 +810,6 @@
    </property>
    <property name="menuRole">
     <enum>QAction::PreferencesRole</enum>
-   </property>
-  </action>
-  <action name="actionEnable_Discord_integration">
-   <property name="checkable">
-    <bool>true</bool>
-   </property>
-   <property name="text">
-    <string>Enable &amp;Discord integration</string>
    </property>
   </action>
   <action name="actionHide_tool_bar">
@@ -804,6 +882,11 @@
   <action name="actionMCA_devices">
    <property name="text">
     <string>&amp;MCA devices…</string>
+   </property>
+  </action>
+  <action name="actionMemory_viewer">
+   <property name="text">
+    <string>Memory &amp;viewer</string>
    </property>
   </action>
   <action name="actionShow_non_primary_monitors">

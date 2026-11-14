@@ -39,6 +39,7 @@
 #include <86box/pci.h>
 #include <86box/sio.h>
 #include <86box/keyboard.h>
+#include <86box/kbc_test.h>
 
 #define STAT_PARITY        0x80
 #define STAT_RTIMEOUT      0x40
@@ -139,6 +140,8 @@ typedef struct atkbc_t {
     /* Main timers. */
     pc_timer_t kbc_poll_timer;
     pc_timer_t kbc_dev_poll_timer;
+
+    pc_timer_t kbc_irq_timer;
 
     /* P2 pulse callback timer. */
     pc_timer_t pulse_cb;
@@ -263,13 +266,13 @@ kbc_translate(atkbc_t *dev, uint8_t val)
         return ret;
     }
 
-    /* Skip break code if translated make code has bit 7 set. */
-    if (translate && (dev->sc_or == 0x80) && (nont_to_t[val] & 0x80)) {
-        kbc_at_log("ATkbc: translate is on, skipping scan code: %02X (original: F0 %02X)\n", nont_to_t[val], val);
-        dev->sc_or = 0;
-        return ret;
-    }
-
+    /* The byte after F0 is translated and gets bit 7 like any other, even
+       when it is not a key code. Response codes do not wait in the
+       keyboard's buffer, and a command such as ED is answered with ACK at
+       once (IBM PS/2 Hardware Interface Technical Reference, Keyboards
+       (101- and 102-Key), October 1990, p. 19 and 24 / PDF 23 and 28). So
+       an FA can follow the F0 of a break code, and the host is waiting for
+       that ACK. */
     kbc_at_log("ATkbc: translate is %s, ", translate ? "on" : "off");
 #ifdef ENABLE_KEYBOARD_AT_LOG
     kbc_at_log("scan code: ");
@@ -350,8 +353,10 @@ kbc_set_do_irq(atkbc_t *dev, uint8_t channel)
 }
 
 static void
-kbc_do_irq(atkbc_t *dev)
+kbc_at_irq(void *priv)
 {
+    atkbc_t *dev = (atkbc_t *) priv;
+
     if (dev->do_irq) {
         /* WARNING: On PS/2, all IRQ's are level-triggered, but the IBM PS/2 KBC firmware is explicitly
                     written to pulse its P2 IRQ bits, so they should be kept as as edge-triggered here. */
@@ -375,6 +380,15 @@ kbc_do_irq(atkbc_t *dev)
 
         dev->do_irq = 0;
     }
+}
+
+static void
+kbc_do_irq(atkbc_t *dev)
+{
+    if (dev->is_asic)
+        kbc_at_irq(dev);
+    else
+        timer_set_delay_u64(&dev->kbc_irq_timer, 3ULL * TIMER_USEC);
 }
 
 static void
@@ -639,8 +653,6 @@ kbc_scan_aux_ps2(atkbc_t *dev)
 static void
 kbc_at_poll_ps2(atkbc_t *dev)
 {
-    kbc_do_irq(dev);
-
     /* Keep the auxiliary transmit delay armed while the interface is disabled
        (clock held low); count it down once the interface is enabled. */
     if (dev->mem[0x20] & 0x20)
@@ -799,7 +811,7 @@ write_p2(atkbc_t *dev, uint8_t val)
         if (!(val & 0x01)) {  /* Pin 0 selected. */
             /* Pin 0 selected. */
             kbc_at_log("write_p2(): Pulse reset!\n");
-            softresetx86(); /* Pulse reset! */
+            softresetx86_from(SOFT_RESET_KBC); /* Pulse reset! */
             cpu_set_edx();
             flushmmucache();
             if ((kbc_ven == KBC_VEN_ALI) ||
@@ -926,6 +938,41 @@ pulse_poll(void *priv)
 
     kbc_at_log("ATkbc: pulse_poll(): P2 now: %02X\n", dev->p2 | dev->old_p2);
     write_p2(dev, dev->p2 | dev->old_p2);
+}
+
+/* HP Vectra 486N firmware uses DE as an extended-command prefix.
+   These board/security commands must not be forwarded to the keyboard:
+   its FE response can be mistaken for the command byte by the BIOS.
+   T.04.02/T.04.05 send one argument after subcommand 94 and eight after 93.
+   Their board/security side effects are not yet modeled. */
+static uint8_t
+write_cmd_vectra(void *priv, uint8_t val)
+{
+    atkbc_t *dev = (atkbc_t *) priv;
+
+    if (val != 0xde)
+        return 1;
+
+    dev->command_phase = 1;
+    dev->wantdata      = 1;
+    dev->state         = STATE_KBC_PARAM;
+    return 0;
+}
+
+static uint8_t
+write_cmd_data_vectra(void *priv, uint8_t val)
+{
+    atkbc_t *dev = (atkbc_t *) priv;
+
+    if (dev->command != 0xde)
+        return 1;
+
+    dev->command_phase = kbc_vectra_next_phase(dev->command_phase, val);
+    if (dev->command_phase) {
+        dev->wantdata = 1;
+        dev->state    = STATE_KBC_PARAM;
+    }
+    return 0;
 }
 
 static uint8_t
@@ -2025,6 +2072,31 @@ write_cmd_phoenix(void *priv, uint8_t val)
 }
 
 static uint8_t
+write_cmd_dec(void *priv, uint8_t val)
+{
+    atkbc_t *dev = (atkbc_t *) priv;
+
+    switch (val) {
+        case 0xc0: { /* Read Port 1, bits 3-0 set to 1 (TRM 8-12) */
+            uint8_t p1 = machine_get_p1(0xff) | 0x0f;
+            kbc_at_log("ATkbc: DEC read P1 (C0): %02X\n", p1);
+            kbc_delay_to_ob(dev, p1, 0, 0x00);
+            return 0;
+        }
+
+        case 0xc1: { /* Read Port 1, P1 returned unmodified (TRM 8-12) */
+            uint8_t p1 = machine_get_p1(0xff);
+            kbc_at_log("ATkbc: DEC read P1 (C1): %02X\n", p1);
+            kbc_delay_to_ob(dev, p1, 0, 0x00);
+            return 0;
+        }
+
+        default:
+            return 1;
+    }
+}
+
+static uint8_t
 write_cmd_olivetti(void *priv, uint8_t val)
 {
     atkbc_t *dev = (atkbc_t *) priv;
@@ -2221,10 +2293,11 @@ read_p1(atkbc_t *dev)
        IBM PS/2 Model 30-286:                                                        x0xxx1xx
        Intel AMI Pentium BIOS'es with AMI MegaKey KB-5 keyboard controller:          x1x1xxxx
        Acer:                                                                         xxxxx0xx
-       Packard Bell PB450:                                                           xxxxx1xx
        P6RP4:                                                                        xx1xx1xx
+       Packard Bell PB450:                                                           xxxxx1xx
        Epson Action Tower 2600:                                                      xxxx01xx
        TriGem Hawk:                                                                  xxxx11xx
+       DEC VAXmate:                                                                  xxxxxxx1
 
        Machine input based on current code:                                          11111111
        Everything non-Green:    Pull down bit 7 if not PS/2 and keyboard is inhibited.
@@ -2245,6 +2318,10 @@ read_p1(atkbc_t *dev)
                                 Pull down bit 3 if CPU speed selected is slow (4 MHz).
                                 Pull down bit 2 if FPU is present.
                                 Pull down bits 1 and 0 always?
+       DEC VAXmate:             Pull down bit 2 if a hard disk controller is installed
+                                (expansion box), pull down bit 1 if the RAM option is
+                                fitted (3 MB), bit 0 always 1 (no error); the ROM
+                                tests bit 2 via C1h before accepting the clock.
 
        Bit 7: AT KBC only - keyboard inhibited (often physical lock): 0 = yes, 1 = no (also Compaq);
        Bit 6: Mostly, display: 0 = CGA, 1 = MDA, inverted on Xi8088 and Acer KBC's;
@@ -2278,14 +2355,17 @@ read_p1(atkbc_t *dev)
                   0, 1: Epson logo;
                   0, 0: Generic AMI logo.
               NCR: Unused;
+              DEC VAXmate: Expansion box installed: 0 = installed, 1 = not installed;
               IBM PS/2: Keyboard power: 0 = no power (fuse error), 1 = OK
               (for some reason, www.win.tue.nl has this in reverse);
               Compaq: FPU: 0 = 80287, 1 = none;
               Sometimes configured for clock switching;
-       Bit 1: PS/2: Auxiliary device data in;
+       Bit 1: DEC VAXmate: RAM option installed: 0 = installed, 1 = not installed;
+              PS/2: Auxiliary device data in;
               Compaq: Reserved;
               NCR: High/auto speed.
-       Bit 0: PS/2: Keyboard device data in;
+       Bit 0: DEC VAXmate: RAM option parity error: 0 = error, 1 = no error;
+              PS/2: Keyboard device data in;
               Compaq: Reserved;
               NCR: DMA mode.
      */
@@ -2644,9 +2724,6 @@ kbc_at_process_cmd(void *priv)
                 if (dev->ib == 0xbb)
                     break;
 
-                if (machines[machine].init == machine_at_pb410a_init)
-                    cpu_override_dynarec = 1;
-
                 if (dev->misc_flags & FLAG_PS2) {
                     set_enable_aux(dev, 1);
                     if ((dev->ports[1] != NULL) && (dev->ports[1]->priv != NULL)) {
@@ -2780,14 +2857,15 @@ kbc_at_port_1_read(uint16_t port, void *priv)
 
     ret = dev->ob;
     dev->status &= ~STAT_OFULL;
+    /* A polled read can consume the byte before its delayed IRQ fires. */
+    dev->do_irq = 0;
+    timer_disable(&dev->kbc_irq_timer);
     /*
        TODO: IRQ is only tied to OBF on the AT KBC, on the PS/2 KBC, it is controlled by a P2 bit.
        This also means that in AT mode, the IRQ is level-triggered.
      */
     if (!(dev->misc_flags & FLAG_PS2) && (dev->irq[0] != 0xffff))
         picintclevel(1 << dev->irq[0], &dev->irq_state);
-    if ((machines[machine].init == machine_at_pb410a_init) && (cpu_override_dynarec == 1))
-        cpu_override_dynarec = 0;
 
     kbc_at_log("ATkbc: [%04X:%08X] read (%04X) = %02X\n",  CS, cpu_state.pc, port, ret);
 
@@ -2815,6 +2893,8 @@ kbc_at_reset(void *priv)
 {
     atkbc_t *dev = (atkbc_t *) priv;
 
+    timer_disable(&dev->kbc_irq_timer);
+    dev->do_irq        = 0;
     dev->status        = STAT_UNLOCKED;
     dev->mem[0x20]     = 0x01;
     dev->mem[0x20]    |= CCB_TRANSLATE;
@@ -2885,6 +2965,7 @@ kbc_at_close(void *priv)
     /* Stop timers. */
     timer_disable(&dev->kbc_dev_poll_timer);
     timer_disable(&dev->kbc_poll_timer);
+    timer_disable(&dev->kbc_irq_timer);
 
     for (int i = 0; i < max_ports; i++) {
         if (kbc_at_ports[i] != NULL) {
@@ -2979,6 +3060,8 @@ kbc_at_init(const device_t *info)
 
     timer_add(&dev->kbc_dev_poll_timer, kbc_at_dev_poll, dev, 1);
 
+    timer_add(&dev->kbc_irq_timer, kbc_at_irq, dev, 0);
+
     dev->write_cmd_data_ven = NULL;
     dev->write_cmd_ven      = NULL;
 
@@ -3007,6 +3090,10 @@ kbc_at_init(const device_t *info)
 
         case KBC_VEN_ACER:
             dev->write_cmd_ven = write_cmd_acer;
+            break;
+
+        case KBC_VEN_DEC_LK250:
+            dev->write_cmd_ven = write_cmd_dec;
             break;
 
         case KBC_VEN_OLIVETTI:
@@ -3073,6 +3160,11 @@ kbc_at_init(const device_t *info)
             dev->write_cmd_ven = write_cmd_quadtel;
             break;
 
+        case KBC_VEN_HP_VECTRA:
+            dev->write_cmd_data_ven = write_cmd_data_vectra;
+            dev->write_cmd_ven = write_cmd_vectra;
+            break;
+
         case KBC_VEN_TOSHIBA:
             dev->write_cmd_data_ven = write_cmd_data_toshiba;
             dev->write_cmd_ven = write_cmd_toshiba;
@@ -3096,9 +3188,10 @@ kbc_at_init(const device_t *info)
 
     /* The actual keyboard. */
     if (keyboard_type == KEYBOARD_TYPE_INTERNAL) {
-        if (machine_has_flags(machine, MACHINE_KEYBOARD_JIS))
-            device_add(machine_has_flags_ex(MACHINE_PS2_KBC) ? &keyboard_ps55_device :
-                       &keyboard_ax_device);
+        const device_t *kbd = machine_get_kbd_device(machine);
+
+        if (kbd != NULL)
+            device_add(kbd);
         else
             device_add_params(&keyboard_at_generic_device, (void *) (uintptr_t)
                               (machine_has_flags_ex(MACHINE_PS2_KBC) ? FLAG_PS2_KBD : 0x00));
@@ -3117,6 +3210,20 @@ const device_t kbc_at_device = {
     .internal_name = "kbc_at",
     .flags         = DEVICE_KBC,
     .local         = KBC_VEN_GENERIC,
+    .init          = kbc_at_init,
+    .close         = kbc_at_close,
+    .reset         = kbc_at_reset,
+    .available     = NULL,
+    .speed_changed = NULL,
+    .force_redraw  = NULL,
+    .config        = NULL
+};
+
+const device_t kbc_at_vectra_device = {
+    .name          = "HP Vectra 486N Keyboard Controller",
+    .internal_name = "kbc_at_vectra",
+    .flags         = DEVICE_KBC,
+    .local         = KBC_VEN_HP_VECTRA,
     .init          = kbc_at_init,
     .close         = kbc_at_close,
     .reset         = kbc_at_reset,

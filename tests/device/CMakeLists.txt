@@ -22,3 +22,62 @@ if(BUILD_TESTING)
     include(GoogleTest)
     gtest_discover_tests(cartridge_tests)
 endif()
+
+if(BUILD_TESTING)
+    add_executable(serial_backend_tests
+        serial_backend_test.cpp
+        ../../src/device/serial_backend.c
+    )
+    target_include_directories(serial_backend_tests PRIVATE
+        ${PROJECT_SOURCE_DIR}/src/include
+        ${PROJECT_BINARY_DIR}/src/include
+    )
+    target_link_libraries(serial_backend_tests PRIVATE GTest::gtest_main)
+    include(GoogleTest)
+    gtest_discover_tests(serial_backend_tests)
+endif()
+
+if(BUILD_TESTING)
+    add_executable(mouse_microtouch_tests
+        mouse_microtouch_test.cpp
+        ../../src/device/mouse_microtouch_touchscreen.c
+        ../../src/device/serial_backend.c
+        ../../src/device/serial_host.c
+        ../../src/utils/fifo8.c
+    )
+    target_compile_definitions(mouse_microtouch_tests PRIVATE IS_TEST)
+    target_include_directories(mouse_microtouch_tests PRIVATE
+        ${PROJECT_SOURCE_DIR}/src/include
+        ${PROJECT_SOURCE_DIR}/src/cpu
+        ${PROJECT_BINARY_DIR}/src/include
+    )
+    target_link_libraries(mouse_microtouch_tests PRIVATE GTest::gtest_main)
+
+    include(GoogleTest)
+    gtest_discover_tests(mouse_microtouch_tests)
+endif()
+
+if(BUILD_TESTING)
+    add_executable(kbc_vectra_tests kbc_vectra_test.cpp)
+    target_link_libraries(kbc_vectra_tests PRIVATE GTest::gtest_main)
+    include(GoogleTest)
+    gtest_discover_tests(kbc_vectra_tests)
+endif()
+
+if(BUILD_TESTING)
+    add_executable(ibm_pc700_power_tests
+        ibm_pc700_power_test.cpp
+        ../../src/device/ibm_pc700_power.c
+    )
+
+    target_include_directories(ibm_pc700_power_tests PRIVATE
+        ${PROJECT_SOURCE_DIR}/src/include
+        ${PROJECT_BINARY_DIR}/src/include
+    )
+    target_link_libraries(ibm_pc700_power_tests PRIVATE GTest::gtest_main)
+
+    include(GoogleTest)
+    gtest_discover_tests(ibm_pc700_power_tests)
+endif()
+
+add_subdirectory(modem)

@@ -78,6 +78,7 @@ typedef struct ibm8514_t {
     int force_old_addr;
     int type;
     ibm8514_card_type local;
+    uint32_t card_variant;
     int bpp;
     int on;
     int accel_bpp;
@@ -139,6 +140,7 @@ typedef struct ibm8514_t {
         uint16_t clip_right;
         uint16_t clip_bottom;
         int16_t  clip_left;
+        uint8_t  x_wrap; /*plot X modulo 1024 (ATI Graphics Ultra at the 8514/A-compatible pitch)*/
         int16_t  clip_top;
         uint8_t  pix_trans[2];
         int      poly_draw;

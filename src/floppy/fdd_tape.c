@@ -47,7 +47,6 @@
 #include <86box/dma.h>
 #include <86box/fdd.h>
 #include <86box/fdd_tape.h>
-#include <86box/fdc.h>
 #include <86box/scsi_device.h>
 #include <86box/scsi_tape.h>
 #include <86box/tape_qic117.h>
@@ -196,7 +195,6 @@ typedef struct fdd_tape_state_t {
 } fdd_tape_state_t;
 
 static fdd_tape_state_t  tape;
-static fdc_t  *tape_fdc = NULL;
 
 /*
    The drive runs its own capstan motor under QIC-117 control and pays no
@@ -363,9 +361,9 @@ tape_image_write(uint32_t offset, const uint8_t *buf, uint32_t len)
 /* Forward references: the clocks are driven from command handling, and the
    cartridge's geometry is re-read when the host lays down a header. */
 static void tape_read_geometry(void);
-static void tape_start_clock(void);
+static void tape_start_clock(void *priv);
 static void tape_stop_clock(void);
-static void tape_start_motion(void);
+static void tape_start_motion(void* priv);
 static void tape_stop_motion_clock(void);
 static void fdd_tape_ui_activity(int active, int write);
 
@@ -508,7 +506,7 @@ tape_report_next_bit(void)
     }
 
     if (tape.report_pos < tape.report_len) {
-        tape.ack = (tape.report_value >> tape.report_pos) & 1;
+        tape.ack = (int) (tape.report_value >> tape.report_pos) & 1;
         tape.report_pos++;
     } else {
         /*
@@ -540,7 +538,7 @@ tape_stop_motion(void)
    it partway (cmd 11/12). A wind to where the head already sits is a no-op.
  */
 static void
-tape_start_wind(int target_segment)
+tape_start_wind(void *priv, int target_segment)
 {
     const int target = target_segment * FDD_TAPE_SECTORS_PER_SEG;
 
@@ -555,7 +553,7 @@ tape_start_wind(int target_segment)
     tape.running     = 1;
     tape.run_off     = 0;
     tape.status     &= ~QIC_STATUS_READY;
-    tape_start_motion();
+    tape_start_motion(priv);
 }
 
 /*
@@ -856,7 +854,7 @@ tape_command_needs_ready(uint8_t command)
 }
 
 static void
-tape_command(uint8_t command)
+tape_command(void *priv, uint8_t command)
 {
     fdd_tape_log("Tape: QIC-117 command %i (%s)\n", command, tape_command_name(command));
 
@@ -1061,9 +1059,9 @@ tape_command(uint8_t command)
                starts flowing now. */
             tape.running = 1;
             tape.run_off = 0;
-            tape_start_motion();
+            tape_start_motion(priv);
             if (tape.xfer_state != TAPE_XFER_IDLE)
-                tape_start_clock();
+                tape_start_clock(priv);
             break;
 
         /*
@@ -1079,7 +1077,7 @@ tape_command(uint8_t command)
                 tape_set_error(QIC_ERROR_NO_CARTRIDGE, command);
                 break;
             }
-            tape_start_wind(tape.reverse ? tape_track_start() : tape_track_end());
+            tape_start_wind(priv, tape.reverse ? tape_track_start() : tape_track_end());
             break;
 
         case QIC_PHYSICAL_REVERSE:
@@ -1087,7 +1085,7 @@ tape_command(uint8_t command)
                 tape_set_error(QIC_ERROR_NO_CARTRIDGE, command);
                 break;
             }
-            tape_start_wind(tape.reverse ? tape_track_end() : tape_track_start());
+            tape_start_wind(priv, tape.reverse ? tape_track_end() : tape_track_start());
             break;
 
         case QIC_SEEK_LOAD_POINT:
@@ -1269,7 +1267,7 @@ tape_command(uint8_t command)
 
 /* Decodes one burst of step pulses into a command or a parameter. */
 static void
-tape_step_pulses(int steps)
+tape_step_pulses(void *priv, int steps)
 {
     if (steps <= 0)
         return;
@@ -1297,7 +1295,7 @@ tape_step_pulses(int steps)
         return;
     }
 
-    tape_command((uint8_t) steps);
+    tape_command(priv, (uint8_t) steps);
 }
 
 /* --------------------------------------------------------------------- */
@@ -1340,23 +1338,25 @@ tape_sector_offset(int track, int side, int sector, uint32_t *offset)
 /* Interval between STEP pulses, from the controller's SPECIFY and data
    rate. QIC-117 hosts program this to TSTEP, nominally 2 ms. The SPECIFY
    step rate is in milliseconds that scale inversely with the data rate, so
-   the interval must divide by the real rate in kbps - fdc_get_bit_rate()
+   the interval must divide by the real rate in kbps - the bit rate hook
    hands back a rate *code* (0 for 500 kbps, 2 for 250 kbps), not the rate
    itself, which would blow the 250 kbps interval up to a quarter second per
    step and make a seek take seconds. A slow seek trips the host's own
    time-out, which then injects extra step pulses that run into the next
    command's pulse train and corrupt its count. */
 static int
-tape_step_interval_us(void)
+tape_step_interval_us(void *priv)
 {
+    fdd_drive_t *drv = (fdd_drive_t *) priv;
+
     int srt;
     int bit_rate;
 
-    if (tape_fdc == NULL)
+    if (drv->ctrl == NULL)
         return 2000;
 
-    srt      = tape_fdc->specify[0] >> 4;
-    bit_rate = tape_fdc->bit_rate;
+    srt      = drv->xfer.step_rate;
+    bit_rate = drv->ctrl->get_bit_rate(drv->ctrl_priv);
     if (bit_rate <= 0)
         bit_rate = 500;
 
@@ -1369,9 +1369,11 @@ tape_step_interval_us(void)
    at a realistic time rather than instantly.
  */
 int
-fdd_tape_step(int drive, int steps)
+fdd_tape_step(void *priv, int steps)
 {
-    if (drive != tape.drive)
+    fdd_drive_t *drv = (fdd_drive_t *) priv;
+
+    if (drv->id != tape.drive)
         return 0;
 
     tape.pulse_count += steps;
@@ -1389,7 +1391,7 @@ fdd_tape_step(int drive, int steps)
         tape.bit_presented = 1;
     }
 
-    return steps * tape_step_interval_us();
+    return steps * tape_step_interval_us(priv);
 }
 
 /*
@@ -1399,9 +1401,11 @@ fdd_tape_step(int drive, int steps)
    only a TTIMEOUT gap marks the end of it.
  */
 static void
-tape_seek(int drive, UNUSED(int track))
+tape_seek(void *priv, UNUSED(int track))
 {
-    if (drive != tape.drive)
+    fdd_drive_t *drv = (fdd_drive_t *) priv;
+
+    if ((drv == NULL) && (drv->id != tape.drive))
         return;
 
     if (tape_cmd_timer_added)
@@ -1410,7 +1414,7 @@ tape_seek(int drive, UNUSED(int track))
 
 /* Fires TTIMEOUT after the last step pulse: the pulse train is complete. */
 static void
-tape_command_timeout(UNUSED(void *priv))
+tape_command_timeout(void *priv)
 {
     int steps     = tape.pulse_count;
     int presented = tape.bit_presented;
@@ -1425,7 +1429,7 @@ tape_command_timeout(UNUSED(void *priv))
     if ((steps == QIC_REPORT_NEXT_BIT) && presented)
         return;
 
-    tape_step_pulses(steps);
+    tape_step_pulses(priv, steps);
 }
 
 /*
@@ -1437,9 +1441,11 @@ tape_command_timeout(UNUSED(void *priv))
    reason.
  */
 static uint64_t
-tape_byte_period(void)
+tape_byte_period(void *priv)
 {
-    int kbps = (tape_fdc != NULL) ? tape_fdc->bit_rate : 500;
+    fdd_drive_t *drv = (fdd_drive_t *) priv;
+
+    int kbps = (drv->ctrl != NULL) ? drv->ctrl->get_bit_rate(drv->ctrl_priv) : 500;
 
     if (kbps <= 0)
         kbps = 500;
@@ -1450,9 +1456,9 @@ tape_byte_period(void)
 
 /* One sector of tape passes the head every this many microseconds. */
 static uint64_t
-tape_sector_period(void)
+tape_sector_period(void *priv)
 {
-    return FDD_TAPE_SECTOR_SIZE * tape_byte_period();
+    return FDD_TAPE_SECTOR_SIZE * tape_byte_period(priv);
 }
 
 /*
@@ -1464,20 +1470,18 @@ tape_sector_period(void)
    segment before its own status poll interrupts the pass.
  */
 static uint64_t
-tape_motion_period(void)
+tape_motion_period(void *priv)
 {
     /* A physical wind runs at the drive's highest speed, faster than either
        streaming or an ID search. */
     if (tape.winding)
-        return tape_sector_period() / TAPE_SCAN_SPEEDUP;
+        return tape_sector_period(priv) / TAPE_SCAN_SPEEDUP;
 
     switch (tape.xfer_state) {
         case TAPE_XFER_READ:
         case TAPE_XFER_WRITE:
         case TAPE_XFER_COMPARE:
         case TAPE_XFER_FORMAT:
-            return tape_sector_period();
-
         default:
             /* Streaming and ID searches both advance at the data rate. The
                head does not free-run ahead under the timer while the host
@@ -1489,15 +1493,15 @@ tape_motion_period(void)
                reach a target before a status poll interrupted the pass, but the
                head then flew tens of segments past before the host could react,
                so a selective restore could never land on its target. */
-            return tape_sector_period();
+            return tape_sector_period(priv);
     }
 }
 
 static void
-tape_start_clock(void)
+tape_start_clock(void *priv)
 {
     if (tape_timer_added)
-        timer_set_delay_u64(&tape_timer, tape_byte_period());
+        timer_set_delay_u64(&tape_timer, tape_byte_period(priv));
 }
 
 static void
@@ -1511,10 +1515,10 @@ tape_stop_clock(void)
 }
 
 static void
-tape_start_motion(void)
+tape_start_motion(void *priv)
 {
     if (tape_motion_timer_added)
-        timer_set_delay_u64(&tape_motion_timer, tape_motion_period());
+        timer_set_delay_u64(&tape_motion_timer, tape_motion_period(priv));
 }
 
 static void
@@ -1526,9 +1530,9 @@ tape_stop_motion_clock(void)
 
 /* Advances the head past one more sector of moving tape. */
 static void
-tape_motion_tick(UNUSED(void *priv))
+tape_motion_tick(void *priv)
 {
-    timer_advance_u64(&tape_motion_timer, tape_motion_period());
+    timer_advance_u64(&tape_motion_timer, tape_motion_period(priv));
 
     if (!tape.running) {
         tape_stop_motion_clock();
@@ -1580,14 +1584,16 @@ tape_motion_tick(UNUSED(void *priv))
 }
 
 static void
-tape_setup_transfer(int state, int sector, int track, int side, int sector_size)
+tape_setup_transfer(void *priv, int state, int sector, int track, int side, int sector_size)
 {
+    fdd_drive_t *drv = (fdd_drive_t *) priv;
+
     uint32_t offset = 0;
 
     tape.xfer_state = TAPE_XFER_IDLE;
     tape_stop_clock();
 
-    if (tape_fdc == NULL)
+    if (drv->ctrl == NULL)
         return;
 
     fdd_tape_log("Tape: %s c=%i h=%i r=%i n=%i (running=%i)\n",
@@ -1597,26 +1603,26 @@ tape_setup_transfer(int state, int sector, int track, int side, int sector_size)
 
     if (!tape_has_cartridge()) {
         fdd_tape_log("Tape: ... no cartridge\n");
-        fdc_nosector(tape_fdc);
+        drv->ctrl->nosector(drv->ctrl_priv);
         return;
     }
 
     /* The tape format only ever uses 1024-byte sectors. */
     if (sector_size != 3) {
         fdd_tape_log("Tape: ... bad sector size %i\n", sector_size);
-        fdc_nosector(tape_fdc);
+        drv->ctrl->nosector(drv->ctrl_priv);
         return;
     }
 
     if (!tape_sector_offset(track, side, sector, &offset)) {
         fdd_tape_log("Tape: ... address is not on tape\n");
-        fdc_nosector(tape_fdc);
+        drv->ctrl->nosector(drv->ctrl_priv);
         return;
     }
 
     if ((state == TAPE_XFER_WRITE) && tape.readonly) {
         fdd_tape_log("Tape: ... cartridge is write protected\n");
-        fdc_writeprotect(tape_fdc);
+        drv->ctrl->writeprotect(drv->ctrl_priv);
         return;
     }
 
@@ -1642,48 +1648,56 @@ tape_setup_transfer(int state, int sector, int track, int side, int sector_size)
        transfer waits here and a motion command sets it going.
      */
     if (tape.running)
-        tape_start_clock();
+        tape_start_clock(priv);
     else
         fdd_tape_log("Tape: ... armed, waiting for tape motion\n");
 }
 
 static void
-tape_readsector(int drive, int sector, int track, int side, UNUSED(int density), int sector_size)
+tape_readsector(void *priv, int sector, int track, int side, UNUSED(int density), int sector_size)
 {
-    if (drive != tape.drive)
+    fdd_drive_t *drv = (fdd_drive_t *) priv;
+
+    if ((drv == NULL) || (drv->id != tape.drive))
         return;
 
     /* Read A Track isn't meaningful on tape. */
     if (sector < 0) {
-        fdc_nosector(tape_fdc);
+        drv->ctrl->nosector(drv->ctrl_priv);
         return;
     }
 
-    tape_setup_transfer(TAPE_XFER_READ, sector, track, side, sector_size);
+    tape_setup_transfer(priv, TAPE_XFER_READ, sector, track, side, sector_size);
 }
 
 static void
-tape_writesector(int drive, int sector, int track, int side, UNUSED(int density), int sector_size)
+tape_writesector(void *priv, int sector, int track, int side, UNUSED(int density), int sector_size)
 {
-    if (drive != tape.drive)
+    fdd_drive_t *drv = (fdd_drive_t *) priv;
+
+    if ((drv == NULL) || (drv->id != tape.drive))
         return;
 
-    tape_setup_transfer(TAPE_XFER_WRITE, sector, track, side, sector_size);
+    tape_setup_transfer(priv, TAPE_XFER_WRITE, sector, track, side, sector_size);
 }
 
 static void
-tape_comparesector(int drive, int sector, int track, int side, UNUSED(int density), int sector_size)
+tape_comparesector(void *priv, int sector, int track, int side, UNUSED(int density), int sector_size)
 {
-    if (drive != tape.drive)
+    fdd_drive_t *drv = (fdd_drive_t *) priv;
+
+    if ((drv == NULL) || (drv->id != tape.drive))
         return;
 
-    tape_setup_transfer(TAPE_XFER_COMPARE, sector, track, side, sector_size);
+    tape_setup_transfer(priv, TAPE_XFER_COMPARE, sector, track, side, sector_size);
 }
 
 /* Hands back the ID of the sector currently under the head. */
 static void
-tape_finish_readaddress(void)
+tape_finish_readaddress(void *priv)
 {
+    fdd_drive_t *drv = (fdd_drive_t *) priv;
+
     int segment;
     int cylinder;
     int sector;
@@ -1705,7 +1719,7 @@ tape_finish_readaddress(void)
     fdd_tape_log("Tape: read ID -> segment %i (c=%i h=%i r=%i)%s\n", segment, cylinder,
                  segment / tape.segs_per_head, sector, tape.running ? "" : " [stopped]");
 
-    fdc_sectorid(tape_fdc, (uint8_t) cylinder, (uint8_t) (segment / tape.segs_per_head),
+    drv->ctrl->sectorid(drv->ctrl_priv, (uint8_t) cylinder, (uint8_t) (segment / tape.segs_per_head),
                  (uint8_t) sector, 3, 0, 0);
 
     /* A search is host-clocked: reading this ID carries the head on to the
@@ -1725,13 +1739,16 @@ tape_finish_readaddress(void)
 
 /* The host uses READ ID to find out where on the tape it currently is. */
 static void
-tape_readaddress(int drive, UNUSED(int side), UNUSED(int density))
+tape_readaddress(void *priv, UNUSED(int side), UNUSED(int density))
 {
-    if ((drive != tape.drive) || (tape_fdc == NULL))
+    fdd_drive_t *drv = (fdd_drive_t *) priv;
+
+    if ((drv == NULL) || (drv->id != tape.drive) ||
+        (drv->ctrl == NULL))
         return;
 
     if (!tape_has_cartridge()) {
-        fdc_nosector(tape_fdc);
+        drv->ctrl->nosector(drv->ctrl_priv);
         return;
     }
 
@@ -1741,19 +1758,22 @@ tape_readaddress(int drive, UNUSED(int side), UNUSED(int density))
        call returns, and would overwrite the result phase we just set up.
      */
     tape.xfer_state = TAPE_XFER_READID;
-    tape_start_clock();
+    tape_start_clock(priv);
 }
 
 static void
-tape_format(int drive, UNUSED(int side), UNUSED(int density), UNUSED(uint8_t fill))
+tape_format(void *priv, UNUSED(int side), UNUSED(int density), UNUSED(uint8_t fill))
 {
-    if ((drive != tape.drive) || (tape_fdc == NULL))
+    fdd_drive_t *drv = (fdd_drive_t *) priv;
+
+    if ((drv == NULL) || (drv->id != tape.drive) ||
+        (drv->ctrl == NULL))
         return;
 
-    fdd_tape_log("Tape: format track, %i sectors\n", fdc_get_format_sectors(tape_fdc));
+    fdd_tape_log("Tape: format track, %i sectors\n", drv->xfer.format_sectors);
 
     if (!tape_has_cartridge() || tape.readonly) {
-        fdc_writeprotect(tape_fdc);
+        drv->ctrl->writeprotect(drv->ctrl_priv);
         return;
     }
 
@@ -1763,13 +1783,15 @@ tape_format(int drive, UNUSED(int side), UNUSED(int density), UNUSED(uint8_t fil
 
     fdd_tape_ui_activity(1, 1);
 
-    tape_start_clock();
+    tape_start_clock(priv);
 }
 
 static void
-tape_stop(int drive)
+tape_stop(void *priv)
 {
-    if (drive != tape.drive)
+    fdd_drive_t *drv = (fdd_drive_t *) priv;
+
+    if ((drv == NULL) || (drv->id != tape.drive))
         return;
 
     tape.xfer_state = TAPE_XFER_IDLE;
@@ -1777,7 +1799,7 @@ tape_stop(int drive)
 }
 
 static int
-tape_hole(UNUSED(int drive))
+tape_hole(UNUSED(void *priv))
 {
     /* Reports a high-density style medium; the actual byte rate follows the
        controller's data rate in tape_byte_period(). */
@@ -1785,20 +1807,22 @@ tape_hole(UNUSED(int drive))
 }
 
 static uint64_t
-tape_byteperiod(UNUSED(int drive))
+tape_byteperiod(void *priv)
 {
-    return tape_byte_period();
+    return tape_byte_period(priv);
 }
 
 /* Moves one byte of the current transfer, once per byte period. */
 static void
-tape_clock(UNUSED(void *priv))
+tape_clock(void *priv)
 {
+    fdd_drive_t *drv = (fdd_drive_t *) priv;
+
     int data;
 
-    timer_advance_u64(&tape_timer, tape_byte_period());
+    timer_advance_u64(&tape_timer, tape_byte_period(priv));
 
-    if (tape_fdc == NULL) {
+    if (drv->ctrl == NULL) {
         tape_stop_clock();
         return;
     }
@@ -1815,11 +1839,11 @@ tape_clock(UNUSED(void *priv))
         case TAPE_XFER_READID:
             tape.xfer_state = TAPE_XFER_IDLE;
             tape_stop_clock();
-            tape_finish_readaddress();
+            tape_finish_readaddress(priv);
             break;
 
         case TAPE_XFER_READ:
-            if (!fdc_is_verify(tape_fdc)) {
+            if (!drv->xfer.verify) {
                 /*
                    A -1 here means the host's DMA transfer has hit its
                    terminal count, which is how a multi-sector read
@@ -1827,7 +1851,7 @@ tape_clock(UNUSED(void *priv))
                    the command itself. Treating it as an overrun would
                    turn every successful transfer into an error.
                  */
-                (void) fdc_data(tape_fdc, tape.buffer[tape.xfer_pos],
+                (void) drv->ctrl->data(drv->ctrl_priv, tape.buffer[tape.xfer_pos],
                                 tape.xfer_pos == (tape.xfer_len - 1));
             }
 
@@ -1838,13 +1862,13 @@ tape_clock(UNUSED(void *priv))
                              tape.buffer[0], tape.buffer[1], tape.buffer[2], tape.buffer[3]);
                 tape.xfer_state = TAPE_XFER_IDLE;
                 tape_stop_clock();
-                fdc_sector_finishread(tape_fdc);
+                drv->ctrl->sector_finishread(drv->ctrl_priv);
             }
             break;
 
         case TAPE_XFER_WRITE:
             /* Terminal count can be indicated via DMA_OVER; when it happens, treat missing bytes as 0. */
-            data = fdc_getdata(tape_fdc, tape.xfer_pos == (tape.xfer_len - 1));
+            data = drv->ctrl->getdata(drv->ctrl_priv, tape.xfer_pos == (tape.xfer_len - 1));
             if ((data & DMA_OVER) || (data == -1))
                  data = 0;
 
@@ -1872,7 +1896,7 @@ tape_clock(UNUSED(void *priv))
                 if (tape.xfer_offset == 0)
                     tape_read_geometry();
 
-                fdc_sector_finishread(tape_fdc);
+                drv->ctrl->sector_finishread(drv->ctrl_priv);
             }
             break;
 
@@ -1881,14 +1905,14 @@ tape_clock(UNUSED(void *priv))
             if (tape.xfer_pos == 0)
                 satisfying_bytes = 0;
 
-            data = fdc_getdata(tape_fdc, tape.xfer_pos == (tape.xfer_len - 1));
+            data = drv->ctrl->getdata(drv->ctrl_priv, tape.xfer_pos == (tape.xfer_len - 1));
             if ((data & DMA_OVER) || (data == -1))
                 data = 0;
 
             const uint8_t received_byte = (uint8_t) (data & 0xff);
             const uint8_t tape_byte     = tape.buffer[tape.xfer_pos];
 
-            switch (fdc_get_compare_condition(tape_fdc)) {
+            switch (drv->xfer.compare) {
                 case 0: /* SCAN EQUAL */
                     if ((received_byte == tape_byte) || (received_byte == 0xFF))
                         satisfying_bytes++;
@@ -1909,7 +1933,7 @@ tape_clock(UNUSED(void *priv))
             if (tape.xfer_pos >= tape.xfer_len) {
                 tape.xfer_state = TAPE_XFER_IDLE;
                 tape_stop_clock();
-                fdc_sector_finishcompare(tape_fdc, satisfying_bytes >= tape.xfer_len);
+                drv->ctrl->sector_finishcompare(drv->ctrl_priv, satisfying_bytes >= tape.xfer_len);
             }
             break;
         }
@@ -1918,16 +1942,18 @@ tape_clock(UNUSED(void *priv))
             /* The host feeds four ID bytes per sector through DMA; the
                sector itself is laid down blank. */
             if (tape.format_datac <= 3) {
-                data = fdc_getdata(tape_fdc, 0);
+                fdd_sector_id_t *fid = drv->xfer.format_id;
+
+                data = drv->ctrl->getdata(drv->ctrl_priv, 0);
                 if (data == -1)
                     data = 0;
-                tape_fdc->format_sector_id.byte_array[tape.format_datac] = data & 0xff;
+                fid->byte_array[tape.format_datac] = data & 0xff;
 
                 if (tape.format_datac == 3) {
-                    fdc_stop_id_request(tape_fdc);
-                    if (!tape_sector_offset(tape_fdc->format_sector_id.id.c,
-                                            tape_fdc->format_sector_id.id.h,
-                                            tape_fdc->format_sector_id.id.r,
+                    drv->ctrl->stop_id_request(drv->ctrl_priv);
+                    if (!tape_sector_offset(fid->id.c,
+                                            fid->id.h,
+                                            fid->id.r,
                                             &tape.format_offset))
                         tape.format_offset = UINT32_MAX;
                 }
@@ -1950,7 +1976,7 @@ tape_clock(UNUSED(void *priv))
                      */
                     tape_head_to_offset(tape.format_offset);
                     if (tape.running)
-                        tape_start_motion();
+                        tape_start_motion(priv);
                 }
                 tape.format_count++;
             }
@@ -1960,12 +1986,12 @@ tape_clock(UNUSED(void *priv))
             if (tape.format_datac == 6) {
                 tape.format_datac = 0;
 
-                if (tape.format_count < fdc_get_format_sectors(tape_fdc))
-                    fdc_request_next_sector_id(tape_fdc);
+                if (tape.format_count < drv->xfer.format_sectors)
+                    drv->ctrl->request_next_sector_id(drv->ctrl_priv);
                 else {
                     tape.xfer_state = TAPE_XFER_IDLE;
                     tape_stop_clock();
-                    fdc_sector_finishread(tape_fdc);
+                    drv->ctrl->sector_finishread(drv->ctrl_priv);
                 }
             }
             break;
@@ -1981,15 +2007,22 @@ tape_clock(UNUSED(void *priv))
 /* --------------------------------------------------------------------- */
 
 int
-fdd_tape_present(int drive)
+fdd_tape_present(void *priv)
 {
-    return tape.attached && (drive == tape.drive);
+    fdd_drive_t *drv = (fdd_drive_t *) priv;
+
+    if (drv == NULL)
+        return 0;
+
+    return tape.attached && (drv->id == tape.drive);
 }
 
 int
-fdd_tape_track0(int drive)
+fdd_tape_track0(void *priv)
 {
-    if (!fdd_tape_present(drive))
+    fdd_drive_t *drv = (fdd_drive_t *) priv;
+
+    if (!fdd_tape_present(drv))
         return 0;
 
     /* TRACK 0 carries the result of the last "report" command instead of
@@ -1998,20 +2031,18 @@ fdd_tape_track0(int drive)
 }
 
 int
-fdd_tape_get_flags(int drive)
+fdd_tape_get_flags(void *priv)
 {
-    if (!fdd_tape_present(drive))
+    fdd_drive_t *drv = (fdd_drive_t *) priv;
+
+    if (!fdd_tape_present(drv))
         return 0;
 
-    /* Enough of a drive for the controller to talk to it: 300 rpm, double
-       sided, and both double and high density media. */
+    /*
+       Enough of a drive for the controller to talk to it: 300 rpm, double
+       sided, and both double and high density media.
+     */
     return 0x01 | 0x08 | 0x10 | 0x20;
-}
-
-void
-fdd_tape_set_fdc(void *fdc)
-{
-    tape_fdc = (fdc_t *) fdc;
 }
 
 /*
@@ -2096,6 +2127,8 @@ fdd_tape_ui_activity(int active, int write)
 static void
 tape_image_release(void)
 {
+    fdd_drive_t *drv = &drives[tape.drive];
+
     if (tape.fp != NULL) {
         fclose(tape.fp);
         tape.fp = NULL;
@@ -2106,7 +2139,7 @@ tape_image_release(void)
     tape.xfer_state = TAPE_XFER_IDLE;
 
     if (tape.attached)
-        writeprot[tape.drive] = 1;
+        drv->writeprot = 1;
 }
 
 void
@@ -2185,8 +2218,10 @@ fdd_tape_load(const char *fn)
      */
     tape.status |= QIC_STATUS_NEW_CARTRIDGE;
 
+    fdd_drive_t *drv = &drives[tape.drive];
+
     if (tape.attached)
-        writeprot[tape.drive] = tape.readonly;
+        drv->writeprot = tape.readonly;
 
     /* Keep the owning entry in step with what is actually in the drive. */
     if (tape_entry >= 0) {
@@ -2204,14 +2239,16 @@ fdd_tape_load(const char *fn)
 /* Queries whether a drive select line belongs to a tape drive. A floppy
    may not be (re)loaded onto such a line. */
 static int
-fdd_tape_line_owned(int drive)
+fdd_tape_line_owned(void *priv)
 {
-    if ((drive < 0) || (drive >= FDD_NUM))
+    fdd_drive_t *drv = (fdd_drive_t *) priv;
+
+    if (drv == NULL)
         return 0;
 
     for (uint8_t c = 0; c < TAPE_NUM; c++) {
         if ((tape_drives[c].bus_type == TAPE_BUS_FDC) &&
-            (tape_drives[c].fdd_unit == drive))
+            (tape_drives[c].fdd_unit == drv->id))
             return 1;
     }
 
@@ -2221,8 +2258,6 @@ fdd_tape_line_owned(int drive)
 void
 fdd_tape_init(void)
 {
-    int drive;
-
     fdd_tape_close();
 
     /*
@@ -2239,7 +2274,10 @@ fdd_tape_init(void)
     if (tape_entry < 0)
         return;
 
-    drive = tape_drives[tape_entry].fdd_unit;
+    int drive = tape_drives[tape_entry].fdd_unit;
+    fdd_drive_t *drv = &(drives[drive]);
+    if (drv == NULL)
+        return;
     if ((drive < 0) || (drive >= FDD_NUM))
         drive = 1;
 
@@ -2258,13 +2296,13 @@ fdd_tape_init(void)
 
     /* timer_add() clears the struct, which also clears any stale enabled
        flag left behind by a timer_close() during a hard reset. */
-    timer_add(&tape_timer, tape_clock, NULL, 0);
+    timer_add(&tape_timer, tape_clock, drv, 0);
     tape_timer_added = 1;
 
-    timer_add(&tape_cmd_timer, tape_command_timeout, NULL, 0);
+    timer_add(&tape_cmd_timer, tape_command_timeout, drv, 0);
     tape_cmd_timer_added = 1;
 
-    timer_add(&tape_motion_timer, tape_motion_tick, NULL, 0);
+    timer_add(&tape_motion_timer, tape_motion_tick, drv, 0);
     tape_motion_timer_added = 1;
 
     timer_add(&tape_busy_timer, tape_busy_done, NULL, 0);
@@ -2275,19 +2313,24 @@ fdd_tape_init(void)
     /* The tape drive takes over this drive select line from whatever
        floppy drive may have been configured on it. Note that it has no
        poll handler - the transfer clock is the drive's own. */
-    drives[drive].seek          = tape_seek;
-    drives[drive].readsector    = tape_readsector;
-    drives[drive].writesector   = tape_writesector;
-    drives[drive].comparesector = tape_comparesector;
-    drives[drive].readaddress   = tape_readaddress;
-    drives[drive].format        = tape_format;
-    drives[drive].hole          = tape_hole;
-    drives[drive].byteperiod    = tape_byteperiod;
-    drives[drive].stop          = tape_stop;
-    drives[drive].poll          = NULL;
+    fdd_format_clear(drv);
 
-    drive_empty[drive] = 0;
-    fdd_changed[drive] = 0;
+    const fdd_format_t ops = {
+        .seek          = tape_seek,
+        .readsector    = tape_readsector,
+        .writesector   = tape_writesector,
+        .comparesector = tape_comparesector,
+        .readaddress   = tape_readaddress,
+        .format        = tape_format,
+        .hole          = tape_hole,
+        .byteperiod    = tape_byteperiod,
+        .stop          = tape_stop
+    };
+
+    fdd_format_set(drv, &ops);
+
+    drv->empty = 0;
+    drv->changed = 0;
 
     char fn[MAX_IMAGE_PATH_LEN + 8];
 
@@ -2317,6 +2360,8 @@ fdd_tape_close(void)
     const int drive        = tape.drive;
     const int was_attached = tape.attached;
 
+    fdd_drive_t *drv = &(drives[drive]);
+
     /* Not fdd_tape_eject(): a close (e.g. on the re-attach path) must not
        clear the owning entry's image, only a runtime eject does that. */
     tape_image_release();
@@ -2330,18 +2375,9 @@ fdd_tape_close(void)
        the idle branch of tape_clock() takes it back out of the list.
      */
     if (was_attached) {
-        drives[drive].seek          = NULL;
-        drives[drive].readsector    = NULL;
-        drives[drive].writesector   = NULL;
-        drives[drive].comparesector = NULL;
-        drives[drive].readaddress   = NULL;
-        drives[drive].format        = NULL;
-        drives[drive].hole          = NULL;
-        drives[drive].byteperiod    = NULL;
-        drives[drive].stop          = NULL;
-        drives[drive].poll          = NULL;
+        fdd_format_clear(drv);
 
-        drive_empty[drive] = 1;
+        drv->empty = 1;
     }
 
     memset(&tape, 0x00, sizeof(tape));
@@ -2349,6 +2385,6 @@ fdd_tape_close(void)
 
     /* A line owned by a tape drive must not have a floppy resurrected
        onto it - the tape (re)attaches right after this on the reset path. */
-    if (was_attached && !fdd_tape_line_owned(drive))
-        fdd_load(drive, floppyfns[drive]);
+    if (was_attached && !fdd_tape_line_owned(drv))
+        fdd_load(drv, drv->image_path);
 }

@@ -329,6 +329,14 @@ SettingsBusTracking::busChannelsInUse(const int bus)
             if (philips_tracking)
                 channelsInUse.append(0);
             break;
+        case CDROM_BUS_SONY:
+            if (sony_tracking)
+                channelsInUse.append(0);
+            break;
+        case CDROM_BUS_CM100:
+            if (cm100_tracking)
+                channelsInUse.append(0);
+            break;
         case CDROM_BUS_MITSUMI:
             if (mitsumi_tracking)
                 channelsInUse.append(0);
@@ -425,6 +433,12 @@ SettingsBusTracking::device_track(int set, uint8_t dev_type, int bus, int channe
         case CDROM_BUS_PHILIPS:
             philips_tracking = set;
             break;
+        case CDROM_BUS_SONY:
+            sony_tracking = set;
+            break;
+        case CDROM_BUS_CM100:
+            cm100_tracking = set;
+            break;
         case CDROM_BUS_MITSUMI:
             mitsumi_tracking = set;
             break;
@@ -485,7 +499,8 @@ SettingsBusTracking::device_track(int set, uint8_t dev_type, int bus, int channe
             break;
 
         case TAPE_BUS_LPT:
-            mask = ((uint64_t) dev_type) << ((uint64_t) ((channel << 3) & 0x3f));
+            /* A hard disk's channel also holds its bridge: port | bridge << 2. */
+            mask = ((uint64_t) dev_type) << ((uint64_t) (((channel & 3) << 3) & 0x3f));
 
             if (set)
                 lpt_tracking |= mask;

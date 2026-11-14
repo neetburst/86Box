@@ -32,6 +32,10 @@ extern "C" {
 #include <86box/hdc_ide.h>
 #include <86box/sound.h>
 #include <86box/machine.h>
+#include <86box/mem.h>
+#include <86box/usb.h>
+#include <86box/thread.h>
+#include <86box/network.h>
 }
 
 #include "qt_settings.hpp"
@@ -47,7 +51,7 @@ void
 Harddrives::populateBuses(QAbstractItemModel *model)
 {
     model->removeRows(0, model->rowCount());
-    model->insertRows(0, 6);
+    model->insertRows(0, 7);
 
     model->setData(model->index(0, 0), "ST-506/ST-412 (MFM/RLL)");
     model->setData(model->index(1, 0), "XTA");
@@ -55,6 +59,7 @@ Harddrives::populateBuses(QAbstractItemModel *model)
     model->setData(model->index(3, 0), "IDE");
     model->setData(model->index(4, 0), "ATAPI");
     model->setData(model->index(5, 0), "SCSI");
+    model->setData(model->index(6, 0), "LPT");
 
     model->setData(model->index(0, 0), HDD_BUS_MFM, Qt::UserRole);
     model->setData(model->index(1, 0), HDD_BUS_XTA, Qt::UserRole);
@@ -62,31 +67,36 @@ Harddrives::populateBuses(QAbstractItemModel *model)
     model->setData(model->index(3, 0), HDD_BUS_IDE, Qt::UserRole);
     model->setData(model->index(4, 0), HDD_BUS_ATAPI, Qt::UserRole);
     model->setData(model->index(5, 0), HDD_BUS_SCSI, Qt::UserRole);
+    model->setData(model->index(6, 0), HDD_BUS_LPT, Qt::UserRole);
 }
 
 void
 Harddrives::populateCDROMBuses(QAbstractItemModel *model)
 {
     model->removeRows(0, model->rowCount());
-    model->insertRows(0, 8);
+    model->insertRows(0, 10);
 
     model->setData(model->index(0, 0), QObject::tr("Disabled"));
     model->setData(model->index(1, 0), "ATAPI");
-    model->setData(model->index(2, 0), "SCSI");
-    model->setData(model->index(3, 0), "Mitsumi");
-    model->setData(model->index(4, 0), "Panasonic/MKE");
-    model->setData(model->index(5, 0), "LPT");
-    model->setData(model->index(6, 0), "Hitachi");
-    model->setData(model->index(7, 0), "Philips/LMS");
+    model->setData(model->index(2, 0), "LPT");
+    model->setData(model->index(3, 0), "SCSI");
+    model->setData(model->index(4, 0), "Hitachi");
+    model->setData(model->index(5, 0), "Mitsumi");
+    model->setData(model->index(6, 0), "Panasonic/MKE");
+    model->setData(model->index(7, 0), "Philips CM-100/CM-153");
+    model->setData(model->index(8, 0), "Philips/LMS");
+    model->setData(model->index(9, 0), "Sony");
 
     model->setData(model->index(0, 0), HDD_BUS_DISABLED, Qt::UserRole);
     model->setData(model->index(1, 0), HDD_BUS_ATAPI, Qt::UserRole);
-    model->setData(model->index(2, 0), HDD_BUS_SCSI, Qt::UserRole);
-    model->setData(model->index(3, 0), CDROM_BUS_MITSUMI, Qt::UserRole);
-    model->setData(model->index(4, 0), CDROM_BUS_MKE, Qt::UserRole);
-    model->setData(model->index(5, 0), CDROM_BUS_LPT, Qt::UserRole);
-    model->setData(model->index(6, 0), CDROM_BUS_HITACHI, Qt::UserRole);
-    model->setData(model->index(7, 0), CDROM_BUS_PHILIPS, Qt::UserRole);
+    model->setData(model->index(2, 0), CDROM_BUS_LPT, Qt::UserRole);
+    model->setData(model->index(3, 0), HDD_BUS_SCSI, Qt::UserRole);
+    model->setData(model->index(4, 0), CDROM_BUS_HITACHI, Qt::UserRole);
+    model->setData(model->index(5, 0), CDROM_BUS_MITSUMI, Qt::UserRole);
+    model->setData(model->index(6, 0), CDROM_BUS_MKE, Qt::UserRole);
+    model->setData(model->index(7, 0), CDROM_BUS_CM100, Qt::UserRole);
+    model->setData(model->index(8, 0), CDROM_BUS_PHILIPS, Qt::UserRole);
+    model->setData(model->index(9, 0), CDROM_BUS_SONY, Qt::UserRole);
 }
 
 void
@@ -120,6 +130,7 @@ Harddrives::populateSpeeds(QAbstractItemModel *model, SettingsCompleter *sc, int
         case HDD_BUS_IDE:
         case HDD_BUS_ATAPI:
         case HDD_BUS_SCSI:
+        case HDD_BUS_LPT:
             num_preset = hdd_preset_get_num();
             break;
 
@@ -138,8 +149,20 @@ Harddrives::populateSpeeds(QAbstractItemModel *model, SettingsCompleter *sc, int
     }
 }
 
+QString
+Harddrives::lptBridgeName(int bridge)
+{
+    return QString(hdd_lpt_bridge_get_name(bridge));
+}
+
+bool
+Harddrives::lptPortEnabled(int port)
+{
+    return (port >= 0) && (port < PARALLEL_MAX) && lpt_ports[port].enabled;
+}
+
 void
-Harddrives::populateBusChannels(QAbstractItemModel *model, int bus, SettingsBusTracking *sbt)
+Harddrives::populateBusChannels(QAbstractItemModel *model, int bus, SettingsBusTracking *sbt, int lptBridges)
 {
     model->removeRows(0, model->rowCount());
 
@@ -202,7 +225,9 @@ Harddrives::populateBusChannels(QAbstractItemModel *model, int bus, SettingsBusT
             busesToCheck.append(CDROM_BUS_MKE);
             break;
         case TAPE_BUS_FDC:
-            busRows = 4;
+            shifter = 2;
+            orer    = 3;
+            busRows = 8;
             busesToCheck.append(TAPE_BUS_FDC);
             break;
         case TAPE_BUS_LPT:
@@ -232,6 +257,24 @@ Harddrives::populateBusChannels(QAbstractItemModel *model, int bus, SettingsBusT
             if ((channel < (SCSI_BUS_MAX * SCSI_ID_MAX)) && (channel >= busRows))
                 busRows = (channel | 15) + 1;
         }
+    }
+
+    if ((bus == TAPE_BUS_LPT) && lptBridges) {
+        /* Each port once per bridge; the port is in use either way. */
+        model->insertRows(0, PARALLEL_MAX * HDD_LPT_BRIDGES);
+        for (int i = 0; i < (PARALLEL_MAX * HDD_LPT_BRIDGES); ++i) {
+            const int port   = i / HDD_LPT_BRIDGES;
+            const int bridge = i % HDD_LPT_BRIDGES;
+            auto      idx    = model->index(i, 0);
+
+            model->setData(idx, QString("LPT%1 %2").arg(port + 1).arg(lptBridgeName(bridge)));
+            model->setData(idx, port | (bridge << 2), Qt::UserRole);
+            auto *channelItem = qobject_cast<QStandardItemModel *>(model)->item(i);
+            if (channelItem)
+                channelItem->setEnabled(!channelsInUse.contains(port) && lpt_ports[port].enabled &&
+                                        ((lptBridges != LptBridgesCdrom) || cdrom_lpt_bridge_valid(bridge)));
+        }
+        return;
     }
 
     model->insertRows(0, busRows);
@@ -312,6 +355,12 @@ Harddrives::BusChannelName(uint8_t bus, uint8_t channel)
         case CDROM_BUS_PHILIPS:
             busName = QString("Philips/LMS");
             break;
+        case CDROM_BUS_SONY:
+            busName = "Sony";
+            break;
+        case CDROM_BUS_CM100:
+            busName = QString("Philips CM-100/CM-153");
+            break;
         case CDROM_BUS_MITSUMI:
             busName = QString("Mitsumi");
             break;
@@ -322,7 +371,7 @@ Harddrives::BusChannelName(uint8_t bus, uint8_t channel)
             busName = QString("Panasonic/MKE (%1:%2)").arg(channel >> 2).arg(channel & 3);
             break;
         case TAPE_BUS_FDC:
-            busName = QString("FDC (%1:%2)").arg(channel >> 1).arg(channel & 1);
+            busName = QString("FDC (%1:%2)").arg(channel >> 2).arg(channel & 3);
             break;
         case TAPE_BUS_LPT:
             busName = QString("LPT%1").arg(channel + 1);
@@ -366,11 +415,15 @@ Harddrives::scsiPlan(bus_owner_t *owners)
     int mach = machine;
     int snd[SOUND_CARD_MAX];
     int scsi[SCSI_CARD_MAX];
+    int net[NET_CARD_MAX];
+    int msd = usb_msd_type;
 
     for (int i = 0; i < SOUND_CARD_MAX; i++)
         snd[i] = sound_card_current[i];
     for (int i = 0; i < SCSI_CARD_MAX; i++)
         scsi[i] = scsi_card_current[i];
+    for (int i = 0; i < NET_CARD_MAX; i++)
+        net[i] = net_cards_conf[i].device_num;
 
     if (Settings::settings != nullptr) {
         mach = Settings::settings->currentMachine();
@@ -378,9 +431,12 @@ Harddrives::scsiPlan(bus_owner_t *owners)
             snd[i] = Settings::settings->currentSoundCard(i);
         for (int i = 0; i < SCSI_CARD_MAX; i++)
             scsi[i] = Settings::settings->currentScsiCard(i);
+        for (int i = 0; i < NET_CARD_MAX; i++)
+            net[i] = Settings::settings->currentNetCard(i);
+        msd = Settings::settings->currentUsbMsd();
     }
 
-    return scsi_plan(owners, mach, snd, scsi);
+    return scsi_plan(owners, mach, snd, net, scsi, msd);
 }
 
 /* A device's label: its short name, with "(Onboard)" for a chip on the
@@ -472,7 +528,10 @@ Harddrives::widenPopup(QComboBox *cbox)
     view->setTextElideMode(Qt::ElideNone);
     timer->setSingleShot(true);
     timer->setInterval(0);
-    QObject::connect(timer, &QTimer::timeout, cbox, [view]() {
+    QObject::connect(timer, &QTimer::timeout, cbox, [cbox]() {
+        /* The popup view may have been replaced since the update was queued. */
+        auto *view = cbox->view();
+        view->setTextElideMode(Qt::ElideNone);
         view->setMinimumWidth(view->sizeHintForColumn(0) + view->verticalScrollBar()->sizeHint().width() + (2 * view->frameWidth()));
     });
 

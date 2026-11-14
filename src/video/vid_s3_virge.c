@@ -51,8 +51,6 @@
     #undef CLAMP
 #endif
 
-static uint64_t virge_time = 0;
-
 static int dither[4][4] = {
     { 0, 4, 1, 5 },
     { 6, 2, 7, 3 },
@@ -77,9 +75,17 @@ static int dither[4][4] = {
 
 #define S3D_RENDER_THREADS_MAX 4
 
-#define RB_ENTRIES(lane) (virge->s3d_write_idx - virge->s3d_read_idx[(lane)])
-#define RB_FULL(lane) (RB_ENTRIES(lane) >= RB_SIZE)
-#define RB_EMPTY(lane) (!RB_ENTRIES(lane))
+/* How the lanes may draw a queued triangle (see "Parallel S3D rendering"). */
+#define S3D_TRI_BARRIER 0x01 /* Not before every lane has finished the triangles ahead of it. */
+#define S3D_TRI_SOLO    0x02 /* Lane 0 draws all of it. */
+
+/* When to wake sleeping render threads: the first one once this many
+   triangles are waiting for it (or as soon as the FIFO thread stops queuing
+   them), the others for a triangle of at least this many lines or once
+   their lane is this many triangles behind. */
+#define S3D_WAKE_BATCH   16
+#define S3D_WAKE_LINES   64
+#define S3D_WAKE_BACKLOG 32
 
 #define FIFO_SIZE 65536
 #define FIFO_MASK (FIFO_SIZE - 1)
@@ -192,6 +198,54 @@ typedef struct s3d_t {
     uint8_t fog_b;
 } s3d_t;
 
+/* One lane of the parallel S3D renderer: the scanlines with the same
+   (y & (lanes - 1)). */
+typedef struct s3d_lane_t {
+    atomic_uint read_idx; /* Next ring buffer entry to draw. */
+    atomic_int  claimed;  /* A render thread is drawing this lane. */
+    int         pixel_count;
+    uint8_t     pad[52];  /* Keeps the lanes on separate cache lines. */
+} s3d_lane_t;
+
+/* What the FIFO thread and the render threads share. This lives outside
+   virge_t because a reset copies all of virge_t back from reset_state,
+   which would wipe out the state of threads that are asleep. */
+typedef struct s3d_render_t {
+    atomic_uint write_idx;                      /* Next ring buffer entry to fill. */
+    atomic_uint done_idx;                       /* write_idx at the last INT_S3D_DONE. */
+    atomic_int  barrier_blocked;                /* A thread went to sleep at a barrier. */
+    atomic_int  asleep[S3D_RENDER_THREADS_MAX]; /* Thread waits, or is about to wait, for its event. */
+    uint8_t     pad[36];
+    s3d_lane_t  lane[S3D_RENDER_THREADS_MAX];
+} s3d_render_t;
+
+/* The triangles the lanes may be drawing at the same time. Only the FIFO
+   thread uses this. */
+typedef struct s3d_batch_t {
+    int      open; /* Triangles can still join. */
+    int      pixel_bytes;
+    int      use_z;
+    uint32_t dest_base;
+    uint32_t dest_str;
+    uint32_t z_base;
+    uint32_t z_str;
+    int      min_x;
+    int      max_x;
+    int      min_y;
+    int      max_y;
+    uint64_t dest_start;
+    uint64_t dest_end;
+    uint64_t z_start;
+    uint64_t z_end;
+} s3d_batch_t;
+
+struct virge_t;
+
+typedef struct s3d_thread_arg_t {
+    struct virge_t *virge;
+    int             thread;
+} s3d_thread_arg_t;
+
 typedef struct virge_t {
     mem_mapping_t linear_mapping;
     mem_mapping_t mmio_mapping;
@@ -224,14 +278,14 @@ typedef struct virge_t {
     int dithering_enabled;
     int memory_size;
 
-    int pixel_count[S3D_RENDER_THREADS_MAX];
     int tri_count;
 
-    int       render_threads;
-    thread_t *render_thread[S3D_RENDER_THREADS_MAX];
-    event_t  *wake_render_thread[S3D_RENDER_THREADS_MAX];
-    event_t  *wake_main_thread;
-    event_t  *not_full_event;
+    int              render_threads;
+    thread_t        *render_thread[S3D_RENDER_THREADS_MAX];
+    s3d_thread_arg_t render_thread_arg[S3D_RENDER_THREADS_MAX];
+    event_t         *wake_render_thread[S3D_RENDER_THREADS_MAX];
+    event_t         *wake_main_thread;
+    event_t         *not_full_event;
 
     uint32_t hwc_fg_col;
     uint32_t hwc_bg_col;
@@ -296,14 +350,12 @@ typedef struct virge_t {
 
     s3d_t s3d_tri;
 
-    s3d_t      s3d_buffer[RB_SIZE];
-    uint8_t    s3d_parallel[RB_SIZE];
-    uint8_t    s3d_barrier[RB_SIZE];
-    uint8_t    s3d_batch_safe[RB_SIZE];
-    ATOMIC_INT s3d_read_idx[S3D_RENDER_THREADS_MAX];
-    ATOMIC_INT s3d_write_idx;
-    ATOMIC_INT s3d_barrier_release_idx;
-    ATOMIC_INT s3d_busy[S3D_RENDER_THREADS_MAX];
+    s3d_t         s3d_buffer[RB_SIZE];
+    uint8_t       s3d_flags[RB_SIZE]; /* S3D_TRI_* */
+    uint8_t       s3d_lanes[RB_SIZE]; /* Bit n set: lane n has lines to draw. */
+    s3d_batch_t   s3d_batch;
+    int           s3d_wake_pending; /* Triangles queued without waking the first render thread. */
+    s3d_render_t *s3d_render;
 
     struct {
         uint32_t pri_ctrl;
@@ -409,31 +461,34 @@ wake_fifo_thread(virge_t *virge)
     thread_set_event(virge->wake_fifo_thread);
 }
 
-static __inline void
-wake_render_threads(virge_t *virge)
-{
-    for (int lane = 0; lane < virge->render_threads; lane++)
-        thread_set_event(virge->wake_render_thread[lane]);
-}
-
+/* The ring buffer is full when the slowest lane is a whole ring behind. */
 static __inline int
 s3d_ring_full(virge_t *virge)
 {
+    s3d_render_t  *render    = virge->s3d_render;
+    const uint32_t write_idx = atomic_load(&render->write_idx);
+
     for (int lane = 0; lane < virge->render_threads; lane++)
-        if (RB_FULL(lane))
+        if ((write_idx - atomic_load(&render->lane[lane].read_idx)) >= RB_SIZE)
             return 1;
 
     return 0;
 }
 
+/* Busy until every lane has drawn everything that was queued. */
 static __inline int
 s3d_engine_busy(virge_t *virge)
 {
+    s3d_render_t  *render    = virge->s3d_render;
+    const uint32_t write_idx = atomic_load(&render->write_idx);
+
     for (int lane = 0; lane < virge->render_threads; lane++)
-        if (virge->s3d_busy[lane] || !RB_EMPTY(lane))
+        if (atomic_load(&render->lane[lane].read_idx) != write_idx)
             return 1;
 
-    return 0;
+    /* The lanes were looked at one after another, so this only was a moment
+       of rest if nothing got queued meanwhile. */
+    return atomic_load(&render->write_idx) != write_idx;
 }
 
 static virge_t *reset_state = NULL;
@@ -444,6 +499,7 @@ static video_timings_t timing_virge_dx_pci               = { .type = VIDEO_PCI, 
 static video_timings_t timing_virge_agp                  = { .type = VIDEO_AGP, .write_b = 2, .write_w = 2, .write_l = 3, .read_b = 28, .read_w = 28, .read_l = 45 };
 
 static void queue_triangle(virge_t *virge);
+static void s3d_wake_pending_flush(virge_t *virge);
 
 static void s3_virge_recalctimings(svga_t *svga);
 static void s3_virge_updatemapping(virge_t *virge);
@@ -521,10 +577,17 @@ enum {
 static void
 s3_virge_update_irqs(virge_t *virge)
 {
-    if ((virge->svga.crtc[0x32] & 0x10) && (virge->subsys_stat & virge->subsys_cntl & INT_MASK))
+    if ((virge->svga.crtc[0x32] & 0x10) &&
+        ((virge->subsys_stat & virge->subsys_cntl & INT_MASK) || svga_vert_int_active(&virge->svga)))
         pci_set_irq(virge->pci_slot, PCI_INTA, &virge->irq_state);
     else
         pci_clear_irq(virge->pci_slot, PCI_INTA, &virge->irq_state);
+}
+
+static void
+s3_virge_vert_int_update(svga_t *svga)
+{
+    s3_virge_update_irqs((virge_t *) svga->priv);
 }
 
 static void
@@ -619,6 +682,12 @@ s3_virge_out(uint16_t addr, uint8_t val, void *priv)
             svga->crtc[svga->crtcreg] = val;
 
             switch (svga->crtcreg) {
+                case 0x11:
+                    svga_vert_int_crtc_write(svga);
+                    /* The interrupt bits don't affect the timings */
+                    if ((val & ~0x30) == (old & ~0x30))
+                        old = val;
+                    break;
                 case 0x31:
                     virge->ma_ext = (virge->ma_ext & 0x1c) | ((val & 0x30) >> 4);
                     break;
@@ -815,6 +884,8 @@ s3_virge_in(uint16_t addr, void *priv)
                 else
                     ret = 0x10;
             }
+            if (svga->vert_int)
+                ret |= 0x80;
             break;
 
         case 0x3c5:
@@ -913,6 +984,7 @@ static void
 s3_virge_recalctimings(svga_t *svga)
 {
     virge_t *virge = (virge_t *) svga->priv;
+    int   enhanced_8bpp_modes = 0;
 
     svga->hdisp = svga->hdisp_old;
 
@@ -1021,13 +1093,23 @@ s3_virge_recalctimings(svga_t *svga)
 
         /* Also make sure vertical blanking starts on display end. */
         svga->vblankstart = svga->dispend;
+
+        svga->hblank_ext     = (svga->crtc[0x5d] & 0x08) ? 64 : 0;
+        svga->hsync_ext      = (svga->crtc[0x5d] & 0x20) ? 32 : 0;
+
         video_force_resize_set_monitor(1, svga->monitor_index);
     } else {
         svga->hblankstart = (((svga->crtc[0x5d] & 0x04) >> 2) << 8) + svga->crtc[2];
 
-        svga->hblank_end_val  = (svga->crtc[3] & 0x1f) | (((svga->crtc[5] & 0x80) >> 7) << 5) |
-                                (((svga->crtc[0x5d] & 0x08) >> 3) << 6);
-        svga->hblank_end_mask = 0x7f;
+        /*
+           What does does, is simple: extend by 64 or 32 cycles, but the comparison
+           is not affected.
+         */
+        svga->hblank_end_val = (svga->crtc[3] & 0x1f) | (((svga->crtc[5] & 0x80) >> 7) << 5);
+
+        svga->hblank_ext     = (svga->crtc[0x5d] & 0x08) ? 64 : 0;
+        svga->hsync_ext      = (svga->crtc[0x5d] & 0x20) ? 32 : 0;
+
         video_force_resize_set_monitor(1, svga->monitor_index);
     }
 
@@ -1182,7 +1264,21 @@ s3_virge_recalctimings(svga_t *svga)
         svga->vram_display_mask = virge->vram_mask;
     }
 
-    svga->hoverride = 1;
+    enhanced_8bpp_modes = !!((svga->crtc[0x3a] & 0x10) && !svga->lowres);
+
+    const int is_vga_mode = ((svga->bpp <= 8) || ((svga->gdcreg[5] & 0x60) <= 0x20));
+    svga->hoverride = !is_vga_mode;
+
+    if (is_vga_mode) {
+        svga->hoverride = 0;
+        /* Preserve the first character when blanking ends at line rollover.
+           A zero end value can also match before rollover on longer lines. */
+        if (enhanced_8bpp_modes || ((svga->hblank_end_val == 0) &&
+                                   ((svga->hblankstart + 1) == svga->hdisp_time) &&
+                                   ((svga->hblankstart >> 6) == ((svga->htotal - 1) >> 6))))
+            svga->hoverride = 1;
+    } else
+        svga->hoverride = 1;
 
     if (svga->render == svga_render_2bpp_lowres)
         svga->render = svga_render_2bpp_s3_lowres;
@@ -1343,7 +1439,7 @@ s3_virge_mmio_read(uint32_t addr, void *priv)
             return ret;
         case 0x8505:
             ret = 0xc0;
-            if (s3d_engine_busy(virge) || virge->virge_busy || !FIFO_EMPTY)
+            if (virge->virge_busy || !FIFO_EMPTY || s3d_engine_busy(virge))
                 ret |= 0x10;
             else
                 ret |= 0x30;
@@ -1387,7 +1483,7 @@ s3_virge_mmio_read_w(uint32_t addr, void *priv)
     switch (addr & 0xfffe) {
         case 0x8504:
             ret = 0xc000;
-            if (s3d_engine_busy(virge) || virge->virge_busy || !FIFO_EMPTY)
+            if (virge->virge_busy || !FIFO_EMPTY || s3d_engine_busy(virge))
                 ret |= 0x1000;
             else
                 ret |= 0x3000;
@@ -1490,7 +1586,7 @@ s3_virge_mmio_read_l(uint32_t addr, void *priv)
 
         case 0x8504:
             ret = 0x0000c000;
-            if (s3d_engine_busy(virge) || virge->virge_busy || !FIFO_EMPTY)
+            if (virge->virge_busy || !FIFO_EMPTY || s3d_engine_busy(virge))
                 ret |= 0x00001000;
             else
                 ret |= 0x00003000;
@@ -1954,7 +2050,7 @@ s3_virge_mmio_write_fifo_l(virge_t *virge, uint32_t addr, uint32_t val)
 }
 
 static void
-mach64_fifo_thread(void *param)
+fifo_thread(void *param)
 {
     virge_t *virge = (virge_t *) param;
 
@@ -1964,8 +2060,6 @@ mach64_fifo_thread(void *param)
         thread_reset_event(virge->wake_fifo_thread);
         virge->virge_busy = 1;
         while (!FIFO_EMPTY) {
-            uint64_t      start_time = plat_timer_read();
-            uint64_t      end_time;
             fifo_entry_t *fifo = &virge->fifo[virge->fifo_read_idx & FIFO_MASK];
             uint32_t      val  = fifo->val;
 
@@ -2000,10 +2094,8 @@ mach64_fifo_thread(void *param)
 
             if (FIFO_ENTRIES > 0xe000)
                 thread_set_event(virge->fifo_not_full_event);
-
-            end_time = plat_timer_read();
-            virge_time += end_time - start_time;
         }
+        s3d_wake_pending_flush(virge);
         virge->virge_busy = 0;
         virge->subsys_stat |= (INT_FIFO_EMP | INT_3DF_EMP);
         if (virge->cmd_dma)
@@ -2170,17 +2262,19 @@ s3_virge_mmio_write_l(uint32_t addr, uint32_t val, void *priv)
                 svga->fullchange = changeframecount;
                 break;
             case 0x81d0:
-                virge->streams.sec_fb0 = val;
+                virge->streams.sec_fb0 = ((virge->memory_size == 8) ?
+                                          (val & 0x7fffff) : (val & 0x3fffff));
                 svga_recalctimings(svga);
                 svga->fullchange = changeframecount;
                 break;
             case 0x81d4:
-                virge->streams.sec_fb1 = val;
+                virge->streams.sec_fb1 = ((virge->memory_size == 8) ?
+                                          (val & 0x7fffff) : (val & 0x3fffff));
                 svga_recalctimings(svga);
                 svga->fullchange = changeframecount;
                 break;
             case 0x81d8:
-                virge->streams.sec_stride = val;
+                virge->streams.sec_stride = val & 0xfff;
                 svga_recalctimings(svga);
                 svga->fullchange = changeframecount;
                 break;
@@ -3392,7 +3486,7 @@ s3_virge_bitblt(virge_t *virge, int count, uint32_t cpu_dat)
 
             while (count && virge->s3d.h) {
                 uint32_t dest_addr = virge->s3d.dest_base + (virge->s3d.dest_x * x_mul) + (virge->s3d.dest_y * virge->s3d.dest_str);
-                uint32_t source    = 0;
+                uint32_t source    = virge->s3d.pat_fg_clr;
                 uint32_t dest      = 0;
                 uint32_t pattern   = virge->s3d.pat_fg_clr;
                 uint32_t out       = 0;
@@ -3477,7 +3571,7 @@ s3_virge_bitblt(virge_t *virge, int count, uint32_t cpu_dat)
 
                     if (update) {
                         READ(dest_addr, dest);
-                        pattern = virge->s3d.pat_fg_clr;
+                        source = pattern = virge->s3d.pat_fg_clr;
 
                         MIX();
 
@@ -3523,7 +3617,7 @@ skip_line:
 
                     if (update) {
                         READ(dest_addr, dest);
-                        pattern = pattern_data[(y & 7) * 8 + (x & 7)];
+                        source = pattern = pattern_data[(y & 7) * 8 + (x & 7)];
 
                         MIX();
 
@@ -3541,8 +3635,9 @@ skip_line:
             break;
 
         default:
-            fatal("s3_virge_bitblt : blit command %i %08x\n",
-                  (virge->s3d.cmd_set >> 27) & 0xf, virge->s3d.cmd_set);
+            /* A guest can write any of these, NetBSD on the Amiga writes 0111
+               for a NOP (1111). */
+            break;
     }
 }
 
@@ -4289,8 +4384,8 @@ tri(virge_t *virge, s3d_t *s3d_tri, s3d_state_t *state, int yc, int32_t dx1, int
             state->x1 += (dx1 * diff_y);
             state->x2 += (dx2 * diff_y);
             state->y -= diff_y;
-            dest_offset -= s3d_tri->dest_str;
-            z_offset -= s3d_tri->z_str;
+            dest_offset -= s3d_tri->dest_str * diff_y;
+            z_offset -= s3d_tri->z_str * diff_y;
             y_count -= diff_y;
         }
         if ((state->y - y_count) < s3d_tri->clip_t)
@@ -4298,9 +4393,17 @@ tri(virge_t *virge, s3d_t *s3d_tri, s3d_state_t *state, int yc, int32_t dx1, int
     }
 
     for (; y_count > 0; y_count--) {
-        int      x  = (state->x1 + ((1 << 20) - 1)) >> 20;
-        int      xe = (state->x2 + ((1 << 20) - 1)) >> 20;
-        uint32_t z  = (state->base_z > 0) ? (state->base_z << 1) : 0;
+        int      x;
+        int      xe;
+        uint32_t z;
+
+        /* Another lane draws this line. */
+        if (((unsigned int) state->y & (unsigned int) (render_lanes - 1)) != (unsigned int) render_lane)
+            goto tri_skip_line;
+
+        x  = (state->x1 + ((1 << 20) - 1)) >> 20;
+        xe = (state->x2 + ((1 << 20) - 1)) >> 20;
+        z  = (state->base_z > 0) ? (state->base_z << 1) : 0;
 
         if (x_dir < 0) {
             x--;
@@ -4375,11 +4478,10 @@ tri(virge_t *virge, s3d_t *s3d_tri, s3d_state_t *state, int yc, int32_t dx1, int
                 }
             }
 
-            if (render_lane == 0)
+            /* Lanes share these pages: writing only on a change keeps the
+               cache line from bouncing between the render threads. */
+            if (virge->svga.changedvram[(dest_offset & virge->vram_mask) >> 12] != changeframecount)
                 virge->svga.changedvram[(dest_offset & virge->vram_mask) >> 12] = changeframecount;
-
-            if (((unsigned int) state->y & (unsigned int) (render_lanes - 1)) != (unsigned int) render_lane)
-                goto tri_skip_line;
 
             dest_addr = dest_offset + (x * (bpp + 1));
             z_addr    = z_offset + (x << 1);
@@ -4488,6 +4590,162 @@ tri_skip_line:
 
 static int tex_size[8] = { 4 * 2, 2 * 2, 2 * 2, 1 * 2, 2 / 1, 2 / 1, 1 * 2, 1 * 2 };
 
+/*
+ * Parallel S3D rendering.
+ *
+ * Scanlines are dealt out to lanes: lane L owns every line whose Y has
+ * (y & (lanes - 1)) == L, and draws its lines of each queued triangle in
+ * queue order. As long as lines of different lanes cannot touch the same
+ * bytes of video memory, the lanes need no coordination and the result is
+ * the same as drawing the triangles whole, one after another.
+ *
+ * The FIFO thread makes sure of that when it queues a triangle. Triangles
+ * that draw into the same rectangle of one destination (and Z) buffer, and
+ * read no texture from inside it, form a batch. A triangle that does not
+ * fit the batch gets a barrier: no lane starts it before every lane has
+ * finished the triangles ahead of it. A triangle whose own lines could
+ * collide is drawn whole by lane 0, with a barrier before and after.
+ *
+ * Render threads are not tied to lanes. A thread claims a lane, draws what
+ * is queued for it, lets go and looks for the next lane with work. One
+ * thread can therefore serve every lane while the load is light, a lane
+ * stopped at a barrier holds nobody up, and a thread only sleeps when
+ * there is nothing it could draw. The FIFO thread wakes the first render
+ * thread for whatever it queues, and the others only for a big triangle or
+ * a lane that falls behind. Nothing here spins: a host with fewer free
+ * cores than render threads just draws more slowly.
+ */
+
+/* What a triangle draws to and reads from. */
+typedef struct s3d_footprint_t {
+    int      min_x;
+    int      max_x;
+    int      min_y;
+    int      max_y;
+    int      pixel_bytes;
+    int      use_z;
+    int      textured;
+    uint64_t tex_start;
+    uint64_t tex_end;
+} s3d_footprint_t;
+
+/*
+ * Destination rectangle of a triangle that is drawn without hardware
+ * clipping, found by walking its edges the way tri() does. An empty
+ * rectangle means that nothing is drawn. Returns 0 if a line leaves the
+ * 4096 x 4096 coordinate space, where tri() wraps around.
+ */
+static int
+s3d_triangle_extent(const s3d_t *s3d_tri, s3d_footprint_t *fp)
+{
+    const int x_dir = s3d_tri->tlr ? 1 : -1;
+    uint32_t  x1    = s3d_tri->txs;
+    uint32_t  x2    = s3d_tri->txend01;
+    int       y     = (int32_t) s3d_tri->tys;
+
+    fp->min_x = 4096;
+    fp->max_x = -1;
+    fp->min_y = 4096;
+    fp->max_y = -1;
+
+    for (int half = 0; half < 2; half++) {
+        const int      line_count = half ? s3d_tri->ty12 : s3d_tri->ty01;
+        const uint32_t dx2        = half ? s3d_tri->TdXdY12 : s3d_tri->TdXdY01;
+
+        if (half)
+            x2 = s3d_tri->txend12;
+
+        for (int line = 0; line < line_count; line++) {
+            int x  = ((int32_t) (x1 + ((1 << 20) - 1))) >> 20;
+            int xe = ((int32_t) (x2 + ((1 << 20) - 1))) >> 20;
+
+            if (x_dir < 0) {
+                x--;
+                xe--;
+            }
+
+            if ((x_dir > 0) ? (x < xe) : (x > xe)) {
+                const int line_min = (x_dir > 0) ? x : (xe + 1);
+                const int line_max = (x_dir > 0) ? (xe - 1) : x;
+
+                if ((line_min < 0) || (line_max > 4095) || (y < 0) || (y > 4095))
+                    return 0;
+
+                if (line_min < fp->min_x)
+                    fp->min_x = line_min;
+                if (line_max > fp->max_x)
+                    fp->max_x = line_max;
+                if (y < fp->min_y)
+                    fp->min_y = y;
+                if (y > fp->max_y)
+                    fp->max_y = y;
+            }
+
+            x1 += s3d_tri->TdXdY02;
+            x2 += dx2;
+            y   = (int32_t) ((uint32_t) y - 1);
+        }
+    }
+
+    return 1;
+}
+
+/* Returns 0 if there is no telling where the triangle draws. */
+static int
+s3d_triangle_footprint(virge_t *virge, const s3d_t *s3d_tri, s3d_footprint_t *fp)
+{
+    const int render_command = (s3d_tri->cmd_set >> 27) & 0xf;
+
+    fp->pixel_bytes = ((s3d_tri->cmd_set >> 2) & 7) + 1;
+    fp->use_z       = !(s3d_tri->cmd_set & CMD_SET_ZB_MODE);
+    fp->textured    = (render_command == 1) || (render_command == 2) ||
+                      (render_command == 5) || (render_command == 6);
+    fp->tex_start   = 0;
+    fp->tex_end     = 0;
+
+    if (fp->pixel_bytes > 3)
+        return 0;
+
+    if (s3d_tri->cmd_set & CMD_SET_HC) {
+        /* tri() draws nothing outside the clipping rectangle, provided
+           that it is one. */
+        if ((s3d_tri->clip_l > s3d_tri->clip_r) || (s3d_tri->clip_t > s3d_tri->clip_b))
+            return 0;
+
+        fp->min_x = s3d_tri->clip_l;
+        fp->max_x = s3d_tri->clip_r;
+        fp->min_y = s3d_tri->clip_t;
+        fp->max_y = s3d_tri->clip_b;
+    } else if (!s3d_triangle_extent(s3d_tri, fp))
+        return 0;
+
+    if (fp->textured) {
+        const int max_d       = (s3d_tri->cmd_set >> 8) & 15;
+        const int format      = (s3d_tri->cmd_set >> 5) & 7;
+        const int texel_bytes = (format == 0) ? 4 : 2; /* What tex_read() fetches. */
+        uint64_t  level_start = s3d_tri->tex_base;
+
+        if (max_d > 9)
+            return 0;
+
+        /* The mip levels follow each other as in s3_virge_triangle(). */
+        fp->tex_start = level_start;
+        fp->tex_end   = level_start;
+        for (int level = max_d; level >= 0; level--) {
+            const uint64_t texels = (uint64_t) 1 << (level * 2);
+
+            if ((level_start + (texels * texel_bytes)) > fp->tex_end)
+                fp->tex_end = level_start + (texels * texel_bytes);
+            level_start += (texels * tex_size[format]) / 2;
+        }
+
+        if (fp->tex_end > ((uint64_t) virge->vram_mask + 1))
+            return 0;
+    }
+
+    return 1;
+}
+
 static __inline int
 s3d_ranges_overlap(uint64_t start_a, uint64_t end_a, uint64_t start_b, uint64_t end_b)
 {
@@ -4495,227 +4753,191 @@ s3d_ranges_overlap(uint64_t start_a, uint64_t end_a, uint64_t start_b, uint64_t 
 }
 
 /*
- * Scanline workers are exact as long as each line owns distinct destination
- * and depth memory. Commands with a stable render-target layout can remain in
- * flight together; target changes and unified-memory aliases add a barrier.
+ * Works out the memory a batch covers. Returns 0 if lines of different
+ * lanes could share bytes: a stride shorter than the lines, a Z buffer on
+ * top of the destination, or a buffer that runs past the video memory and
+ * wraps around.
  */
 static int
-s3d_triangle_parallel_safe(virge_t *virge, const s3d_t *s3d_tri)
+s3d_batch_set_ranges(virge_t *virge, s3d_batch_t *batch)
 {
-    const int      render_command = (s3d_tri->cmd_set >> 27) & 0xf;
-    const int      bpp            = (s3d_tri->cmd_set >> 2) & 7;
-    const int      pixel_bytes    = bpp + 1;
-    const int      x_dir          = s3d_tri->tlr ? 1 : -1;
-    const int      use_z          = !(s3d_tri->cmd_set & CMD_SET_ZB_MODE);
-    const int      hard_clip      = !!(s3d_tri->cmd_set & CMD_SET_HC);
-    const uint64_t vram_size      = (uint64_t) virge->vram_mask + 1;
-    uint32_t       x1             = s3d_tri->txs;
-    uint32_t       x2             = s3d_tri->txend01;
-    int            y              = (int32_t) s3d_tri->tys;
-    int            min_x          = 4096;
-    int            max_x          = -1;
-    int            min_y          = 4096;
-    int            max_y          = -1;
-    int            drawn_lines    = 0;
+    const uint64_t vram_size = (uint64_t) virge->vram_mask + 1;
+    const uint64_t line_end  = (uint64_t) batch->max_x + 1;
 
-    if ((pixel_bytes < 1) || (pixel_bytes > 3))
+    if ((line_end * batch->pixel_bytes) > batch->dest_str)
         return 0;
 
-    for (int half = 0; half < 2; half++) {
-        const int      line_count = half ? s3d_tri->ty12 : s3d_tri->ty01;
-        const uint32_t dx1        = s3d_tri->TdXdY02;
-        const uint32_t dx2        = half ? s3d_tri->TdXdY12 : s3d_tri->TdXdY01;
+    batch->dest_start = batch->dest_base + ((uint64_t) batch->min_y * batch->dest_str) +
+                        ((uint64_t) batch->min_x * batch->pixel_bytes);
+    batch->dest_end   = batch->dest_base + ((uint64_t) batch->max_y * batch->dest_str) +
+                        (line_end * batch->pixel_bytes);
+    if (batch->dest_end > vram_size)
+        return 0;
 
-        if (half)
-            x2 = s3d_tri->txend12;
+    if (batch->use_z) {
+        if ((line_end * 2) > batch->z_str)
+            return 0;
 
-        for (int line = 0; line < line_count; line++) {
-            int draw_x;
-            int draw_xe;
-            int line_min;
-            int line_max;
+        batch->z_start = batch->z_base + ((uint64_t) batch->min_y * batch->z_str) +
+                         ((uint64_t) batch->min_x * 2);
+        batch->z_end   = batch->z_base + ((uint64_t) batch->max_y * batch->z_str) +
+                         (line_end * 2);
+        if ((batch->z_end > vram_size) ||
+            s3d_ranges_overlap(batch->dest_start, batch->dest_end, batch->z_start, batch->z_end))
+            return 0;
+    }
 
-            if (hard_clip && ((y < s3d_tri->clip_t) || (y > s3d_tri->clip_b)))
-                goto next_line;
+    return 1;
+}
 
-            draw_x  = (int) (((int64_t) (int32_t) x1 + ((1 << 20) - 1)) >> 20);
-            draw_xe = (int) (((int64_t) (int32_t) x2 + ((1 << 20) - 1)) >> 20);
-            if (x_dir < 0) {
-                draw_x--;
-                draw_xe--;
-            }
+/* A texture inside the buffers of a batch would change while it is read. */
+static int
+s3d_batch_texture_outside(const s3d_batch_t *batch, const s3d_footprint_t *fp)
+{
+    if (!fp->textured)
+        return 1;
 
-            if ((draw_x == draw_xe) || ((x_dir > 0) ? (draw_x > draw_xe) : (draw_x < draw_xe)))
-                goto next_line;
+    if (s3d_ranges_overlap(fp->tex_start, fp->tex_end, batch->dest_start, batch->dest_end))
+        return 0;
 
-            line_min = (x_dir > 0) ? draw_x : draw_xe + 1;
-            line_max = (x_dir > 0) ? draw_xe - 1 : draw_x;
+    return !batch->use_z ||
+           !s3d_ranges_overlap(fp->tex_start, fp->tex_end, batch->z_start, batch->z_end);
+}
 
-            if (hard_clip) {
-                if (line_min < s3d_tri->clip_l)
-                    line_min = s3d_tri->clip_l;
-                if (line_max > s3d_tri->clip_r)
-                    line_max = s3d_tri->clip_r;
-            }
+/* Can the lanes draw the triangle alongside what the batch already has? */
+static int
+s3d_batch_accepts(const s3d_batch_t *batch, const s3d_t *s3d_tri, const s3d_footprint_t *fp)
+{
+    if (!batch->open || (fp->pixel_bytes != batch->pixel_bytes) ||
+        (s3d_tri->dest_base != batch->dest_base) || (s3d_tri->dest_str != batch->dest_str))
+        return 0;
 
-            if (line_min > line_max)
-                goto next_line;
-            if ((line_min < 0) || (line_max > 4095) || (y < 0) || (y > 4095))
-                return 0;
+    if ((fp->min_x < batch->min_x) || (fp->max_x > batch->max_x) ||
+        (fp->min_y < batch->min_y) || (fp->max_y > batch->max_y))
+        return 0;
 
-            if (line_min < min_x)
-                min_x = line_min;
-            if (line_max > max_x)
-                max_x = line_max;
-            if (y < min_y)
-                min_y = y;
-            if (y > max_y)
-                max_y = y;
-            drawn_lines++;
+    if (fp->use_z && (!batch->use_z || (s3d_tri->z_base != batch->z_base) ||
+                      (s3d_tri->z_str != batch->z_str)))
+        return 0;
 
-next_line:
-            x1 += dx1;
-            x2 += dx2;
-            y--;
+    return s3d_batch_texture_outside(batch, fp);
+}
+
+/*
+ * Starts a new batch with a triangle. Returns 0 if the lanes cannot share
+ * the triangle at all.
+ */
+static int
+s3d_batch_start(virge_t *virge, const s3d_t *s3d_tri, const s3d_footprint_t *fp)
+{
+    s3d_batch_t *batch = &virge->s3d_batch;
+    s3d_batch_t  next  = { 0 };
+
+    next.open        = 1;
+    next.pixel_bytes = fp->pixel_bytes;
+    next.dest_base   = s3d_tri->dest_base;
+    next.dest_str    = s3d_tri->dest_str;
+    next.min_x       = fp->min_x;
+    next.max_x       = fp->max_x;
+    next.min_y       = fp->min_y;
+    next.max_y       = fp->max_y;
+    next.use_z       = fp->use_z;
+    if (fp->use_z) {
+        next.z_base = s3d_tri->z_base;
+        next.z_str  = s3d_tri->z_str;
+    }
+
+    /*
+     * The usual reasons for a new batch are a page flip, a rectangle that
+     * grew, or the first triangle that uses the Z buffer. While the frame
+     * keeps its shape, carry the rectangle and the Z buffer of the last
+     * batch over, so that the triangles to come do not each end up with a
+     * barrier until the batch covers the whole frame again.
+     */
+    if ((batch->pixel_bytes == next.pixel_bytes) && (batch->dest_str == next.dest_str)) {
+        s3d_batch_t wide = next;
+
+        wide.min_x = MIN(wide.min_x, batch->min_x);
+        wide.max_x = MAX(wide.max_x, batch->max_x);
+        wide.min_y = MIN(wide.min_y, batch->min_y);
+        wide.max_y = MAX(wide.max_y, batch->max_y);
+        if (!wide.use_z && batch->use_z) {
+            wide.use_z  = 1;
+            wide.z_base = batch->z_base;
+            wide.z_str  = batch->z_str;
+        }
+
+        if (s3d_batch_set_ranges(virge, &wide) && s3d_batch_texture_outside(&wide, fp)) {
+            *batch = wide;
+            return 1;
         }
     }
 
-    if (drawn_lines < (virge->render_threads * 2))
-        return 0;
-
-    const uint64_t dest_span = (uint64_t) (max_x - min_x + 1) * pixel_bytes;
-    const uint64_t dest_start = (uint64_t) s3d_tri->dest_base +
-                                ((uint64_t) min_y * s3d_tri->dest_str) +
-                                ((uint64_t) min_x * pixel_bytes);
-    const uint64_t dest_end = (uint64_t) s3d_tri->dest_base +
-                              ((uint64_t) max_y * s3d_tri->dest_str) +
-                              ((uint64_t) (max_x + 1) * pixel_bytes);
-
-    if (((drawn_lines > 1) && (((uint64_t) s3d_tri->dest_str < dest_span) ||
-                               ((uint64_t) (max_x + 1) * pixel_bytes > s3d_tri->dest_str))) ||
-        (dest_end > vram_size))
-        return 0;
-
-    uint64_t z_start = 0;
-    uint64_t z_end   = 0;
-    if (use_z) {
-        const uint64_t z_span = (uint64_t) (max_x - min_x + 1) * 2;
-
-        z_start = (uint64_t) s3d_tri->z_base + ((uint64_t) min_y * s3d_tri->z_str) +
-                  ((uint64_t) min_x * 2);
-        z_end = (uint64_t) s3d_tri->z_base + ((uint64_t) max_y * s3d_tri->z_str) +
-                ((uint64_t) (max_x + 1) * 2);
-        if (((drawn_lines > 1) && (((uint64_t) s3d_tri->z_str < z_span) ||
-                                   ((uint64_t) (max_x + 1) * 2 > s3d_tri->z_str))) ||
-            (z_end > vram_size) || s3d_ranges_overlap(dest_start, dest_end, z_start, z_end))
-            return 0;
+    if (s3d_batch_set_ranges(virge, &next) && s3d_batch_texture_outside(&next, fp)) {
+        *batch = next;
+        return 1;
     }
 
-    if ((render_command == 1) || (render_command == 2) ||
-        (render_command == 5) || (render_command == 6)) {
-        const int max_d  = (s3d_tri->cmd_set >> 8) & 15;
-        const int format = (s3d_tri->cmd_set >> 5) & 7;
-        uint64_t  texture_bytes = 0;
-
-        if (max_d > 9)
-            return 0;
-        for (int level = 0; level <= max_d; level++)
-            texture_bytes += ((uint64_t) 1 << (level * 2)) * tex_size[format] / 2;
-
-        const uint64_t texture_start = s3d_tri->tex_base;
-        const uint64_t texture_end   = texture_start + texture_bytes;
-
-        if ((texture_end > vram_size) ||
-            s3d_ranges_overlap(texture_start, texture_end, dest_start, dest_end) ||
-            (use_z && s3d_ranges_overlap(texture_start, texture_end, z_start, z_end)))
-            return 0;
-    }
-
-    return 1;
+    batch->open = 0;
+    return 0;
 }
 
-static int
-s3d_triangle_batch_safe(virge_t *virge, const s3d_t *s3d_tri)
+/* The lanes that own a line between two Y coordinates. */
+static uint8_t
+s3d_lanes_between(int lanes, int64_t min_y, int64_t max_y)
 {
-    const int      render_command = (s3d_tri->cmd_set >> 27) & 0xf;
-    const int      bpp            = (s3d_tri->cmd_set >> 2) & 7;
-    const int      pixel_bytes    = bpp + 1;
-    const int      use_z          = !(s3d_tri->cmd_set & CMD_SET_ZB_MODE);
-    const uint64_t vram_size      = (uint64_t) virge->vram_mask + 1;
+    uint8_t mask = 0;
 
-    if (!(s3d_tri->cmd_set & CMD_SET_HC) || (pixel_bytes < 1) || (pixel_bytes > 3) ||
-        (s3d_tri->clip_l < 0) || (s3d_tri->clip_l > s3d_tri->clip_r) ||
-        (s3d_tri->clip_r > 4095) || (s3d_tri->clip_t < 0) ||
-        (s3d_tri->clip_t > s3d_tri->clip_b) || (s3d_tri->clip_b > 4095))
-        return 0;
+    if ((max_y - min_y) >= (lanes - 1))
+        return (1 << lanes) - 1;
 
-    const uint64_t dest_start = (uint64_t) s3d_tri->dest_base +
-                                ((uint64_t) s3d_tri->clip_t * s3d_tri->dest_str) +
-                                ((uint64_t) s3d_tri->clip_l * pixel_bytes);
-    const uint64_t dest_end = (uint64_t) s3d_tri->dest_base +
-                              ((uint64_t) s3d_tri->clip_b * s3d_tri->dest_str) +
-                              ((uint64_t) (s3d_tri->clip_r + 1) * pixel_bytes);
+    for (int64_t y = min_y; y <= max_y; y++)
+        mask |= 1 << (y & (lanes - 1));
 
-    if (((uint64_t) (s3d_tri->clip_r + 1) * pixel_bytes > s3d_tri->dest_str) ||
-        (dest_end > vram_size))
-        return 0;
-
-    uint64_t z_start = 0;
-    uint64_t z_end   = 0;
-    if (use_z) {
-        z_start = (uint64_t) s3d_tri->z_base +
-                  ((uint64_t) s3d_tri->clip_t * s3d_tri->z_str) +
-                  ((uint64_t) s3d_tri->clip_l * 2);
-        z_end = (uint64_t) s3d_tri->z_base +
-                ((uint64_t) s3d_tri->clip_b * s3d_tri->z_str) +
-                ((uint64_t) (s3d_tri->clip_r + 1) * 2);
-        if (((uint64_t) (s3d_tri->clip_r + 1) * 2 > s3d_tri->z_str) ||
-            (z_end > vram_size) || s3d_ranges_overlap(dest_start, dest_end, z_start, z_end))
-            return 0;
-    }
-
-    if ((render_command == 1) || (render_command == 2) ||
-        (render_command == 5) || (render_command == 6)) {
-        const int max_d  = (s3d_tri->cmd_set >> 8) & 15;
-        const int format = (s3d_tri->cmd_set >> 5) & 7;
-        uint64_t  texture_bytes = 0;
-
-        if (max_d > 9)
-            return 0;
-        for (int level = 0; level <= max_d; level++)
-            texture_bytes += ((uint64_t) 1 << (level * 2)) * tex_size[format] / 2;
-
-        const uint64_t texture_start = s3d_tri->tex_base;
-        const uint64_t texture_end   = texture_start + texture_bytes;
-
-        if ((texture_end > vram_size) ||
-            s3d_ranges_overlap(texture_start, texture_end, dest_start, dest_end) ||
-            (use_z && s3d_ranges_overlap(texture_start, texture_end, z_start, z_end)))
-            return 0;
-    }
-
-    return 1;
+    return mask;
 }
 
-static int
-s3d_triangles_batch_compatible(const s3d_t *previous, const s3d_t *current)
+/*
+ * Decides how the lanes may draw the triangle that is about to be queued.
+ * Returns its S3D_TRI_ flags, and in *lanes the lanes that have lines of it.
+ */
+static uint8_t
+s3d_triangle_plan(virge_t *virge, const s3d_t *s3d_tri, uint8_t *lanes)
 {
-    const int previous_use_z = !(previous->cmd_set & CMD_SET_ZB_MODE);
-    const int current_use_z  = !(current->cmd_set & CMD_SET_ZB_MODE);
+    s3d_footprint_t fp;
+    int64_t         min_y;
+    int64_t         max_y;
 
-    if (((previous->cmd_set ^ current->cmd_set) & (CMD_SET_FORMAT_MASK | CMD_SET_HC)) ||
-        (previous->dest_base != current->dest_base) ||
-        (previous->dest_str != current->dest_str) ||
-        (previous->clip_l != current->clip_l) || (previous->clip_r != current->clip_r) ||
-        (previous->clip_t != current->clip_t) || (previous->clip_b != current->clip_b) ||
-        (previous_use_z != current_use_z))
+    *lanes = 1;
+
+    if (virge->render_threads == 1)
         return 0;
 
-    if (current_use_z && ((previous->z_base != current->z_base) ||
-                          (previous->z_str != current->z_str)))
+    if (!s3d_triangle_footprint(virge, s3d_tri, &fp)) {
+        virge->s3d_batch.open = 0;
+        return S3D_TRI_BARRIER | S3D_TRI_SOLO;
+    }
+
+    /* Of the rectangle, only the lines the triangle itself has count. */
+    max_y = (int32_t) s3d_tri->tys;
+    min_y = max_y - (s3d_tri->ty01 + s3d_tri->ty12) + 1;
+    if (min_y < fp.min_y)
+        min_y = fp.min_y;
+    if (max_y > fp.max_y)
+        max_y = fp.max_y;
+
+    *lanes = s3d_lanes_between(virge->render_threads, min_y, max_y);
+    if (!*lanes)
+        return 0; /* Nothing to draw, and so nothing to keep apart. */
+
+    if (s3d_batch_accepts(&virge->s3d_batch, s3d_tri, &fp))
         return 0;
 
-    return 1;
+    if (s3d_batch_start(virge, s3d_tri, &fp))
+        return S3D_TRI_BARRIER;
+
+    *lanes = 1;
+    return S3D_TRI_BARRIER | S3D_TRI_SOLO;
 }
 
 static void
@@ -4725,9 +4947,6 @@ s3_virge_triangle(virge_t *virge, s3d_t *s3d_tri, int render_lane, int render_la
 
     uint32_t tex_base;
     int      c;
-
-    uint64_t start_time = plat_timer_read();
-    uint64_t end_time;
 
     state.pixel_count = 0;
 
@@ -4860,238 +5079,278 @@ s3_virge_triangle(virge_t *virge, s3d_t *s3d_tri, int render_lane, int render_la
     tri(virge, s3d_tri, &state, s3d_tri->ty12, s3d_tri->TdXdY02, s3d_tri->TdXdY12,
         render_lane, render_lanes);
 
-    virge->pixel_count[render_lane] += state.pixel_count;
-    if (render_lane == 0)
-        virge->tri_count++;
-
-    end_time = plat_timer_read();
-
-    if (render_lane == 0)
-        virge_time += end_time - start_time;
+    virge->s3d_render->lane[render_lane].pixel_count += state.pixel_count;
 }
 
-static int
-s3d_all_readers_at(virge_t *virge, int read_idx)
+/* Has every lane drawn all the triangles ahead of this ring buffer entry? */
+static __inline int
+s3d_lanes_reached(virge_t *virge, uint32_t idx)
 {
-    for (int lane = 1; lane < virge->render_threads; lane++)
-        if (virge->s3d_read_idx[lane] != read_idx)
+    s3d_render_t *render = virge->s3d_render;
+
+    for (int lane = 0; lane < virge->render_threads; lane++)
+        if ((int32_t) (atomic_load(&render->lane[lane].read_idx) - idx) < 0)
             return 0;
 
     return 1;
 }
 
+#define S3D_LANE_IDLE    0 /* Nothing queued. */
+#define S3D_LANE_BLOCKED 1 /* At a barrier that another lane has yet to reach. */
+#define S3D_LANE_READY   2
+
 static int
-s3d_all_renderers_empty(virge_t *virge)
+s3d_lane_state(virge_t *virge, int lane)
+{
+    s3d_render_t  *render   = virge->s3d_render;
+    const uint32_t read_idx = atomic_load(&render->lane[lane].read_idx);
+
+    if (read_idx == atomic_load(&render->write_idx))
+        return S3D_LANE_IDLE;
+
+    if ((virge->s3d_flags[read_idx & RB_MASK] & S3D_TRI_BARRIER) &&
+        !s3d_lanes_reached(virge, read_idx))
+        return S3D_LANE_BLOCKED;
+
+    return S3D_LANE_READY;
+}
+
+/* Is there a lane that the calling thread could draw right now? */
+static int
+s3d_work_waiting(virge_t *virge)
 {
     for (int lane = 0; lane < virge->render_threads; lane++)
-        if (!RB_EMPTY(lane))
-            return 0;
+        if (!atomic_load(&virge->s3d_render->lane[lane].claimed) &&
+            (s3d_lane_state(virge, lane) == S3D_LANE_READY))
+            return 1;
 
-    return 1;
+    return 0;
 }
 
+/* Wakes a render thread, unless it is awake or is being woken already. */
 static __inline void
-s3d_spin_pause(void)
+s3d_wake_thread(virge_t *virge, int thread)
 {
-#if defined(__GNUC__) && (defined(__i386__) || defined(__x86_64__))
-    __asm__ __volatile__("pause");
-#else
-    atomic_signal_fence(memory_order_seq_cst);
-#endif
+    s3d_render_t *render = virge->s3d_render;
+
+    if (atomic_load(&render->asleep[thread]) && atomic_exchange(&render->asleep[thread], 0))
+        thread_set_event(virge->wake_render_thread[thread]);
 }
 
-static int
-s3d_wait_for_helpers(virge_t *virge, int read_idx)
-{
-    for (int spin = 0; virge->render_thread_run &&
-                       !s3d_all_readers_at(virge, read_idx) &&
-                       (spin < 16384); spin++)
-        s3d_spin_pause();
-
-    while (virge->render_thread_run && !s3d_all_readers_at(virge, read_idx)) {
-        thread_reset_event(virge->wake_render_thread[0]);
-        if (virge->render_thread_run && !s3d_all_readers_at(virge, read_idx))
-            thread_wait_event(virge->wake_render_thread[0], -1);
-    }
-
-    return virge->render_thread_run;
-}
-
-static int
-s3d_wait_for_lane_zero(virge_t *virge, int lane, int read_idx)
-{
-    thread_set_event(virge->wake_render_thread[0]);
-
-    for (int spin = 0; virge->render_thread_run &&
-                       (virge->s3d_read_idx[0] <= read_idx) &&
-                       (spin < 16384); spin++)
-        s3d_spin_pause();
-
-    while (virge->render_thread_run && (virge->s3d_read_idx[0] <= read_idx)) {
-        thread_reset_event(virge->wake_render_thread[lane]);
-        if (virge->render_thread_run && (virge->s3d_read_idx[0] <= read_idx))
-            thread_wait_event(virge->wake_render_thread[lane], -1);
-    }
-
-    return virge->render_thread_run;
-}
-
-static int
-s3d_wait_for_batch_release(virge_t *virge, int lane, int read_idx)
-{
-    const int release_idx = read_idx + 1;
-
-    thread_set_event(virge->wake_render_thread[0]);
-
-    for (int spin = 0; virge->render_thread_run &&
-                       (virge->s3d_barrier_release_idx != release_idx) &&
-                       (spin < 16384); spin++)
-        s3d_spin_pause();
-
-    while (virge->render_thread_run &&
-           (virge->s3d_barrier_release_idx != release_idx)) {
-        thread_reset_event(virge->wake_render_thread[lane]);
-        if (virge->render_thread_run &&
-            (virge->s3d_barrier_release_idx != release_idx))
-            thread_wait_event(virge->wake_render_thread[lane], -1);
-    }
-
-    return virge->render_thread_run;
-}
-
+/* A lane is done with one more ring buffer entry. */
 static void
-render_thread_common(void *param, int lane)
+s3d_lane_advance(virge_t *virge, int lane, uint32_t read_idx)
 {
-    virge_t *virge = (virge_t *) param;
+    s3d_render_t *render = virge->s3d_render;
+    uint32_t      write_idx;
+    unsigned int  done_idx;
 
-    while (virge->render_thread_run) {
-        thread_reset_event(virge->wake_render_thread[lane]);
-        if (virge->render_thread_run && RB_EMPTY(lane))
-            thread_wait_event(virge->wake_render_thread[lane], -1);
-        if (!virge->render_thread_run)
-            break;
+    atomic_store(&render->lane[lane].read_idx, read_idx);
+    write_idx = atomic_load(&render->write_idx);
 
-        virge->s3d_busy[lane] = 1;
+    /* The FIFO thread waits while a lane is a whole ring behind. Let it
+       continue once that lane has caught up by half, not at every entry. */
+    if ((write_idx - read_idx) == (RB_SIZE / 2))
+        thread_set_event(virge->not_full_event);
 
-        for (;;) {
-            while (virge->render_thread_run && !RB_EMPTY(lane)) {
-                const int read_idx = virge->s3d_read_idx[lane];
-                const int slot     = read_idx & RB_MASK;
-                s3d_t   *s3d_tri   = &virge->s3d_buffer[slot];
-                const int parallel = virge->s3d_parallel[slot];
-
-                if (parallel) {
-                    if (virge->s3d_barrier[slot]) {
-                        if (lane == 0) {
-                            if (!s3d_wait_for_helpers(virge, read_idx))
-                                break;
-                            virge->s3d_barrier_release_idx = read_idx + 1;
-                            for (int helper = 1; helper < virge->render_threads; helper++)
-                                thread_set_event(virge->wake_render_thread[helper]);
-                        } else if (!s3d_wait_for_batch_release(virge, lane, read_idx)) {
-                            break;
-                        }
-                    }
-
-                    s3_virge_triangle(virge, s3d_tri, lane, virge->render_threads);
-                    virge->s3d_read_idx[lane]++;
-                } else if (lane == 0) {
-                    if (!s3d_wait_for_helpers(virge, read_idx))
-                        break;
-                    s3_virge_triangle(virge, s3d_tri, 0, 1);
-                    virge->s3d_read_idx[0]++;
-                    for (int helper = 1; helper < virge->render_threads; helper++)
-                        thread_set_event(virge->wake_render_thread[helper]);
-                } else if (!s3d_wait_for_lane_zero(virge, lane, read_idx)) {
-                    break;
-                } else {
-                    virge->s3d_read_idx[lane]++;
-                }
-
-                thread_set_event(virge->not_full_event);
-            }
-
-            if ((lane != 0) || !virge->render_thread_run || s3d_all_renderers_empty(virge))
-                break;
-
-            thread_reset_event(virge->wake_render_thread[0]);
-            if (!s3d_all_renderers_empty(virge))
-                thread_wait_event(virge->wake_render_thread[0], -1);
-        }
-
-        virge->s3d_busy[lane] = 0;
-        if (lane != 0) {
-            thread_set_event(virge->wake_render_thread[0]);
-        } else if (virge->render_thread_run && s3d_all_renderers_empty(virge)) {
+    /* The engine is done when the last lane reaches the end of the queue.
+       Several lanes can see that happen; the first one reports it. */
+    if ((read_idx == write_idx) && !s3d_engine_busy(virge)) {
+        done_idx = atomic_load(&render->done_idx);
+        if ((done_idx != write_idx) &&
+            atomic_compare_exchange_strong(&render->done_idx, &done_idx, write_idx)) {
             virge->subsys_stat |= INT_S3D_DONE;
             virge->irq_pending++;
         }
     }
+}
 
-    virge->s3d_busy[lane] = 0;
-    if (lane != 0)
-        thread_set_event(virge->wake_render_thread[0]);
+/*
+ * Draws what is queued for a lane that the calling thread has claimed, up
+ * to the end of the queue or to a barrier that is still closed. Returns
+ * nonzero if that got the lane any further.
+ */
+static int
+s3d_lane_run(virge_t *virge, int lane, int *blocked)
+{
+    s3d_render_t *render = virge->s3d_render;
+    int           drawn  = 0;
+
+    while (virge->render_thread_run) {
+        const uint32_t read_idx = atomic_load(&render->lane[lane].read_idx);
+        const int      slot     = read_idx & RB_MASK;
+        const int      state    = s3d_lane_state(virge, lane);
+        uint8_t        flags;
+
+        if (state != S3D_LANE_READY) {
+            if (state == S3D_LANE_BLOCKED)
+                *blocked = 1;
+            break;
+        }
+
+        flags = virge->s3d_flags[slot];
+
+        /* A barrier has opened: threads that ran out of work because of
+           it can come back. */
+        if ((flags & S3D_TRI_BARRIER) && atomic_load(&render->barrier_blocked) &&
+            atomic_exchange(&render->barrier_blocked, 0)) {
+            for (int thread = 0; thread < virge->render_threads; thread++)
+                s3d_wake_thread(virge, thread);
+        }
+
+        if (virge->s3d_lanes[slot] & (1 << lane))
+            s3_virge_triangle(virge, &virge->s3d_buffer[slot], lane,
+                              (flags & S3D_TRI_SOLO) ? 1 : virge->render_threads);
+        if (lane == 0)
+            virge->tri_count++;
+
+        s3d_lane_advance(virge, lane, read_idx + 1);
+        drawn = 1;
+    }
+
+    return drawn;
 }
 
 static void
-render_thread_0(void *param)
+s3d_render_thread(void *param)
 {
-    render_thread_common(param, 0);
+    const s3d_thread_arg_t *arg    = (const s3d_thread_arg_t *) param;
+    virge_t                *virge  = arg->virge;
+    const int               thread = arg->thread;
+    const int               lanes  = virge->render_threads;
+    s3d_render_t           *render = virge->s3d_render;
+
+    while (virge->render_thread_run) {
+        int drawn   = 0;
+        int blocked = 0;
+
+        /* This thread's own lane first, then any other nobody is drawing. */
+        for (int i = 0; i < lanes; i++) {
+            const int   lane = (thread + i) & (lanes - 1);
+            s3d_lane_t *l    = &render->lane[lane];
+            int         state;
+
+            if (atomic_load(&l->claimed))
+                continue;
+
+            state = s3d_lane_state(virge, lane);
+            if (state == S3D_LANE_BLOCKED)
+                blocked = 1;
+            if ((state != S3D_LANE_READY) || atomic_exchange(&l->claimed, 1))
+                continue;
+
+            drawn |= s3d_lane_run(virge, lane, &blocked);
+            atomic_store(&l->claimed, 0);
+        }
+
+        if (drawn)
+            continue;
+
+        /*
+         * Nothing to draw. Sleep until the FIFO thread, or a thread that
+         * opened a barrier, sets the event. They look at the flags below
+         * after they have changed the queue, and the flags go up here
+         * before the last look at the queue, so one side always notices
+         * the other and no wake-up is lost. Only the first render thread
+         * is owed one for every triangle: whichever threads are awake
+         * draw for all the lanes.
+         */
+        thread_reset_event(virge->wake_render_thread[thread]);
+        atomic_store(&render->asleep[thread], 1);
+        if (blocked)
+            atomic_store(&render->barrier_blocked, 1);
+        if (virge->render_thread_run && !s3d_work_waiting(virge))
+            thread_wait_event(virge->wake_render_thread[thread], -1);
+        atomic_store(&render->asleep[thread], 0);
+    }
 }
 
 static void
-render_thread_1(void *param)
+s3d_render_init(virge_t *virge)
 {
-    render_thread_common(param, 1);
+    virge->s3d_render        = (s3d_render_t *) calloc(1, sizeof(s3d_render_t));
+    virge->render_thread_run = 1;
+    for (int thread = 0; thread < virge->render_threads; thread++)
+        virge->wake_render_thread[thread] = thread_create_event();
+    virge->wake_main_thread = thread_create_event();
+    virge->not_full_event   = thread_create_event();
+    for (int thread = 0; thread < virge->render_threads; thread++) {
+        virge->render_thread_arg[thread].virge  = virge;
+        virge->render_thread_arg[thread].thread = thread;
+        virge->render_thread[thread]            = thread_create_named(s3d_render_thread,
+                                                                      &virge->render_thread_arg[thread],
+                                                                      "s3_virge_render");
+    }
 }
 
 static void
-render_thread_2(void *param)
+s3d_render_close(virge_t *virge)
 {
-    render_thread_common(param, 2);
+    virge->render_thread_run = 0;
+    for (int thread = 0; thread < virge->render_threads; thread++)
+        thread_set_event(virge->wake_render_thread[thread]);
+    for (int thread = 0; thread < virge->render_threads; thread++)
+        thread_wait(virge->render_thread[thread]);
+    thread_destroy_event(virge->not_full_event);
+    thread_destroy_event(virge->wake_main_thread);
+    for (int thread = 0; thread < virge->render_threads; thread++)
+        thread_destroy_event(virge->wake_render_thread[thread]);
+    free(virge->s3d_render);
 }
 
+/*
+ * Wakes the first render thread for triangles that were queued without
+ * doing so. The FIFO thread has to call this whenever it stops queuing
+ * triangles: before it waits for room in the ring buffer, and when its own
+ * FIFO has run empty.
+ */
 static void
-render_thread_3(void *param)
+s3d_wake_pending_flush(virge_t *virge)
 {
-    render_thread_common(param, 3);
+    if (virge->s3d_wake_pending) {
+        virge->s3d_wake_pending = 0;
+        s3d_wake_thread(virge, 0);
+    }
 }
-
-static void (*const render_thread_entry[S3D_RENDER_THREADS_MAX])(void *) = {
-    render_thread_0, render_thread_1, render_thread_2, render_thread_3
-};
 
 static void
 queue_triangle(virge_t *virge)
 {
+    s3d_render_t  *render    = virge->s3d_render;
+    const uint32_t write_idx = atomic_load(&render->write_idx);
+    const int      slot      = write_idx & RB_MASK;
+    uint8_t        flags;
+    int            big;
+
     while (s3d_ring_full(virge)) {
+        s3d_wake_pending_flush(virge);
         thread_reset_event(virge->not_full_event);
         if (s3d_ring_full(virge))
             thread_wait_event(virge->not_full_event, -1); /*Wait for room in ringbuffer*/
     }
 
-    const int write_idx  = virge->s3d_write_idx;
-    const int slot       = write_idx & RB_MASK;
-    const int parallel   = (virge->render_threads > 1) &&
-                           s3d_triangle_parallel_safe(virge, &virge->s3d_tri);
-    const int batch_safe = parallel && s3d_triangle_batch_safe(virge, &virge->s3d_tri);
-    int       barrier    = 1;
+    flags                   = s3d_triangle_plan(virge, &virge->s3d_tri, &virge->s3d_lanes[slot]);
+    virge->s3d_flags[slot]  = flags;
+    virge->s3d_buffer[slot] = virge->s3d_tri;
+    atomic_store(&render->write_idx, write_idx + 1);
 
-    if (batch_safe && write_idx) {
-        const int previous_slot = (write_idx - 1) & RB_MASK;
+    /*
+     * The first render thread draws for every lane while the others sleep.
+     * If it is asleep too, let a few triangles come together before waking
+     * it: a thread that is woken for each one spends more time on that than
+     * on drawing when the host has no core to spare. An awake thread finds
+     * the triangle by itself.
+     */
+    if (!atomic_load(&render->asleep[0]))
+        virge->s3d_wake_pending = 0;
+    else if (++virge->s3d_wake_pending >= S3D_WAKE_BATCH)
+        s3d_wake_pending_flush(virge);
 
-        if (virge->s3d_batch_safe[previous_slot] &&
-            s3d_triangles_batch_compatible(&virge->s3d_buffer[previous_slot],
-                                           &virge->s3d_tri))
-            barrier = 0;
-    }
-
-    virge->s3d_buffer[slot]     = virge->s3d_tri;
-    virge->s3d_parallel[slot]   = parallel;
-    virge->s3d_barrier[slot]    = barrier;
-    virge->s3d_batch_safe[slot] = batch_safe;
-    virge->s3d_write_idx++;
-    wake_render_threads(virge);
+    /* The others join in for a big triangle, or when their lane falls behind. */
+    big = !(flags & S3D_TRI_SOLO) && ((virge->s3d_tri.ty01 + virge->s3d_tri.ty12) >= S3D_WAKE_LINES);
+    for (int thread = 1; thread < virge->render_threads; thread++)
+        if (big || (((write_idx + 1) - atomic_load(&render->lane[thread].read_idx)) >= S3D_WAKE_BACKLOG))
+            s3d_wake_thread(virge, thread);
 }
 
 static void
@@ -5547,7 +5806,7 @@ s3_virge_overlay_draw(svga_t *svga, int displine)
     int       x_write = 4;
     int       x;
     uint32_t *p;
-    uint8_t  *src = &svga->vram[svga->overlay_latch.addr];
+    uint8_t  *src = &svga->vram[svga->overlay_latch.addr & virge->vram_mask];
 
     if (virge->chip < S3_VIRGEGX2)
         offset = (virge->streams.sec_x - virge->streams.pri_x) + 1;
@@ -5656,16 +5915,28 @@ s3_virge_pci_read(UNUSED(int func), int addr, UNUSED(int len), void *priv)
             break;
 
         case 0x2c:
-            ret = 0x33;
+            if (virge->chip >= S3_VIRGEDX)
+                ret = svga->crtc[0x81];
+            else
+                ret = 0x33;
             break; /* Subsystem vendor ID */
         case 0x2d:
-            ret = 0x53;
+            if (virge->chip >= S3_VIRGEDX)
+                ret = svga->crtc[0x82];
+            else
+                ret = 0x53;
             break;
         case 0x2e:
-            ret = virge->virge_id_low;
+            if (virge->chip >= S3_VIRGEDX)
+                ret = svga->crtc[0x83];
+            else
+                ret = virge->virge_id_low;
             break;
         case 0x2f:
-            ret = virge->virge_id_high;
+            if (virge->chip >= S3_VIRGEDX)
+                ret = svga->crtc[0x84];
+            else
+                ret = virge->virge_id_high;
             break;
 
         case 0x30:
@@ -5829,12 +6100,15 @@ s3_virge_pci_write(UNUSED(int func), int addr, UNUSED(int len), uint8_t val, voi
             virge->pci_regs[0x3c] = val;
             return;
 
+        /* The AGP command register takes only what the status
+           register offers (AGP 2.0 6.1.10: reserved and unimplemented fields
+           read 0) -- the rates of 84h; no 4G (5) nor sideband (9). */
         case 0x88:
-            virge->pci_regs[0x88] = val & 0x27;
+            virge->pci_regs[0x88] = val & ((virge->chip >= S3_TRIO3D2X) ? 0x03 : 0x01);
             return;
 
         case 0x89:
-            virge->pci_regs[0x89] = val & 0x03;
+            virge->pci_regs[0x89] = val & 0x01;
             return;
 
         case 0x8b:
@@ -5887,24 +6161,19 @@ s3_virge_reset(void *priv)
     virge_t *dev = (virge_t *) priv;
 
     if (reset_state != NULL) {
+        /* Let both queues run dry first: the FIFO and render threads must
+           not be in the middle of them when the state is put back. */
         s3_virge_wait_fifo_idle(dev);
         while (s3d_engine_busy(dev)) {
             thread_reset_event(dev->not_full_event);
-            wake_render_threads(dev);
             if (s3d_engine_busy(dev))
                 thread_wait_event(dev->not_full_event, 1);
         }
 
         s3_virge_disable_handlers(dev);
-        dev->virge_busy     = 0;
-        dev->fifo_write_idx = 0;
-        dev->fifo_read_idx  = 0;
-        dev->s3d_write_idx  = 0;
-        dev->s3d_barrier_release_idx = 0;
-        for (int lane = 0; lane < dev->render_threads; lane++) {
-            dev->s3d_busy[lane]     = 0;
-            dev->s3d_read_idx[lane] = 0;
-        }
+        dev->virge_busy       = 0;
+        dev->fifo_write_idx   = 0;
+        dev->fifo_read_idx    = 0;
         reset_state->pci_slot = dev->pci_slot;
 
         *dev = *reset_state;
@@ -6082,7 +6351,6 @@ s3_virge_init(const device_t *info)
             virge->virge_id_low      = 0x10;
             virge->svga.crtc[0x6c]   = 1;
             virge->svga.crtc[0x59]   = 0x70;
-            virge->svga.vblank_start = s3_virge_vblank_start;
             virge->chip              = S3_VIRGEGX2;
             video_inform(VIDEO_FLAG_TYPE_SPECIAL, virge->is_agp ? &timing_virge_agp : &timing_virge_dx_pci);
             break;
@@ -6095,7 +6363,6 @@ s3_virge_init(const device_t *info)
             virge->virge_rev         = 0x01;
             virge->svga.crtc[0x6c]   = 1;
             virge->svga.crtc[0x59]   = 0x70;
-            virge->svga.vblank_start = s3_virge_vblank_start;
             virge->chip              = S3_TRIO3D2X;
             video_inform(VIDEO_FLAG_TYPE_SPECIAL, virge->is_agp ? &timing_virge_agp : &timing_virge_dx_pci);
             break;
@@ -6111,11 +6378,13 @@ s3_virge_init(const device_t *info)
             virge->virge_id_low      = 0x01;
             virge->svga.crtc[0x6c]   = 1;
             virge->svga.crtc[0x59]   = 0x70;
-            virge->svga.vblank_start = s3_virge_vblank_start;
             virge->chip              = S3_VIRGEDX;
             video_inform(VIDEO_FLAG_TYPE_SPECIAL, &timing_virge_dx_pci);
             break;
     }
+
+    virge->svga.vblank_start    = s3_virge_vblank_start;
+    virge->svga.vert_int_update = s3_virge_vert_int_update;
 
     if (virge->chip == S3_VIRGEGX2) {
         virge->vram_mask       = (4 << 20) - 1;
@@ -6176,19 +6445,12 @@ s3_virge_init(const device_t *info)
 
     virge->svga.force_old_addr = 1;
 
-    virge->render_thread_run = 1;
-    for (int lane = 0; lane < virge->render_threads; lane++)
-        virge->wake_render_thread[lane] = thread_create_event();
-    virge->wake_main_thread = thread_create_event();
-    virge->not_full_event   = thread_create_event();
-    for (int lane = 0; lane < virge->render_threads; lane++)
-        virge->render_thread[lane] = thread_create_named(render_thread_entry[lane], virge,
-                                                         "s3_virge_render");
+    s3d_render_init(virge);
 
     virge->fifo_thread_run     = 1;
     virge->wake_fifo_thread    = thread_create_event();
     virge->fifo_not_full_event = thread_create_event();
-    virge->fifo_thread         = thread_create(mach64_fifo_thread, virge);
+    virge->fifo_thread         = thread_create(fifo_thread, virge);
 
     timer_add(&virge->irq_timer, s3_virge_update_irq_timer, virge, 1);
 
@@ -6210,14 +6472,7 @@ s3_virge_close(void *priv)
     thread_destroy_event(virge->fifo_not_full_event);
     thread_destroy_event(virge->wake_fifo_thread);
 
-    virge->render_thread_run = 0;
-    wake_render_threads(virge);
-    for (int lane = 0; lane < virge->render_threads; lane++)
-        thread_wait(virge->render_thread[lane]);
-    thread_destroy_event(virge->not_full_event);
-    thread_destroy_event(virge->wake_main_thread);
-    for (int lane = 0; lane < virge->render_threads; lane++)
-        thread_destroy_event(virge->wake_render_thread[lane]);
+    s3d_render_close(virge);
 
     svga_close(&virge->svga);
 

@@ -491,7 +491,8 @@ OpenGLRenderer::setup_fbo(struct shader *shader, struct shader_fbo *fbo)
 {
     fbo->texture.internal_format = GL_RGB8;
     fbo->texture.format          = GL_RGB;
-    fbo->texture.min_filter = fbo->texture.mag_filter = shader->filter_linear ? GL_LINEAR : GL_NEAREST;
+    /* filter_linear is -1 when the preset doesn't set it, use nearest then. */
+    fbo->texture.min_filter = fbo->texture.mag_filter = (shader->filter_linear > 0) ? GL_LINEAR : GL_NEAREST;
     fbo->texture.width                                = 2048;
     fbo->texture.height                               = 2048;
     fbo->texture.type                                 = GL_UNSIGNED_BYTE;
@@ -513,7 +514,7 @@ OpenGLRenderer::setup_fbo(struct shader *shader, struct shader_fbo *fbo)
     }
 
     if (fbo->texture.mipmap)
-        fbo->texture.min_filter = shader->filter_linear ? GL_LINEAR_MIPMAP_LINEAR : GL_NEAREST_MIPMAP_NEAREST;
+        fbo->texture.min_filter = (shader->filter_linear > 0) ? GL_LINEAR_MIPMAP_LINEAR : GL_NEAREST_MIPMAP_NEAREST;
 
     create_fbo(fbo);
 }
@@ -698,6 +699,10 @@ OpenGLRenderer::load_glslp(glsl_t *glsl, int num_shader, const char *f)
             for (int i = 0; i < p->num_shaders; ++i) {
                 struct shader      *shader = &p->shaders[i];
                 struct shader_pass *pass   = &gshader->passes[i];
+
+                /* filter_linear0 is the filtering of the preset's input, filter_linearN that of the
+                   output of pass N-1, which is the input of pass N. */
+                pass->input_filter_linear = (i == 0) ? p->input_filter_linear : p->shaders[i - 1].filter_linear;
 
                 strcpy(pass->alias, shader->alias);
                 if (!strlen(pass->alias))
@@ -1140,11 +1145,13 @@ OpenGLRenderer::initialize()
         for (auto &flag : buf_usage)
             flag.test_and_set();
 
-        main_window->showMessage(MBX_ERROR, QString(), tr("Error initializing OpenGL.") + QStringLiteral("\n") + e.what() + QStringLiteral("\n") + tr("Falling back to software rendering."), false);
-
+        /* Set these before the message box: its event loop can deliver
+           another expose event, which would otherwise call us again. */
         context->doneCurrent();
         isFinalized   = true;
         isInitialized = true;
+
+        main_window->showMessage(MBX_ERROR, QString(), tr("Error initializing OpenGL.") + QStringLiteral("\n") + e.what() + QStringLiteral("\n") + tr("Falling back to software rendering."), false);
 
         emit errorInitializing();
     }
@@ -1217,7 +1224,7 @@ OpenGLRenderer::onBlit(int buf_idx, int x, int y, int w, int h)
 #ifdef Q_OS_MACOS
     glw.glViewport(
         destination.x(),
-        destination.y(),
+        destinationGLY(),
         destination.width(),
         destination.height());
 #endif
@@ -1273,7 +1280,7 @@ OpenGLRenderer::resizeEvent(QResizeEvent *event)
 
     glw.glViewport(
         destination.x(),
-        destination.y(),
+        destinationGLY(),
         destination.width(),
         destination.height());
 
@@ -1471,6 +1478,13 @@ OpenGLRenderer::getOptions(QWidget *parent)
 
 extern void standalone_scale(QRect &destination, int width, int height, QRect source, int scalemode);
 
+/* The destination is measured from the top of the window, but GL measures viewports from the bottom. */
+int
+OpenGLRenderer::destinationGLY() const
+{
+    return output_size.height() - destination.y() - destination.height();
+}
+
 QRect
 OpenGLRenderer::sceneRenderRect() const
 {
@@ -1494,15 +1508,21 @@ OpenGLRenderer::render()
     if (notReady())
         return;
 
+    /* The timer-driven callers reach here with no context current, and each monitor has its own
+       context, so the frame would otherwise be drawn into whichever window drew last. */
+    if (!context->makeCurrent(this))
+        return;
+
+    /* The image can extend past the window edges, so the offsets can be negative. */
     struct {
-        uint32_t x;
-        uint32_t y;
+        int32_t  x;
+        int32_t  y;
         uint32_t w;
         uint32_t h;
     } window_rect;
 
     window_rect.x = destination.x();
-    window_rect.y = destination.y();
+    window_rect.y = destinationGLY();
     window_rect.w = destination.width();
     window_rect.h = destination.height();
 
@@ -1593,6 +1613,21 @@ OpenGLRenderer::render()
             bool                resetFiltering = false;
             struct shader_pass *pass           = &shader->passes[i];
 
+            /* The preset's filtering for this pass's input if it sets one, otherwise the filter
+               method chosen in the menu. */
+            const int input_linear = (pass->input_filter_linear >= 0) ? pass->input_filter_linear : video_filter_method;
+
+            /* The first pass of a shader reads the scene or the previous shader's output. */
+            if (i == 0) {
+                input->fbo.texture.min_filter = input->fbo.texture.mag_filter = input_linear ? GL_LINEAR : GL_NEAREST;
+                if (input->fbo.texture.mipmap)
+                    input->fbo.texture.min_filter = input_linear ? GL_LINEAR_MIPMAP_LINEAR : GL_NEAREST_MIPMAP_NEAREST;
+                glw.glBindTexture(GL_TEXTURE_2D, input->fbo.texture.id);
+                glw.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, input->fbo.texture.min_filter);
+                glw.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, input->fbo.texture.mag_filter);
+                glw.glBindTexture(GL_TEXTURE_2D, 0);
+            }
+
             memcpy(pass->state.input_size, input->state.output_size, 2 * sizeof(GLfloat));
             memcpy(pass->state.input_texture_size, input->state.output_texture_size, 2 * sizeof(GLfloat));
 
@@ -1615,8 +1650,8 @@ OpenGLRenderer::render()
             } else {
                 resetFiltering = true;
                 glw.glBindTexture(GL_TEXTURE_2D, input->fbo.texture.id);
-                glw.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, video_filter_method ? GL_LINEAR : GL_NEAREST);
-                glw.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, video_filter_method ? GL_LINEAR : GL_NEAREST);
+                glw.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, input_linear ? GL_LINEAR : GL_NEAREST);
+                glw.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, input_linear ? GL_LINEAR : GL_NEAREST);
                 glw.glBindTexture(GL_TEXTURE_2D, 0);
                 glw.glViewport(window_rect.x, window_rect.y, window_rect.w, window_rect.h);
             }
@@ -1778,8 +1813,11 @@ OpenGLRenderer::render()
         render_pass(&data);
     }
 
+    /* Screenshots only cover the part of the image that is inside the window. */
+    const QRect read_rect = QRect(window_rect.x, window_rect.y, window_rect.w, window_rect.h).intersected(QRect(QPoint(0, 0), output_size));
+
     if (monitors[r_monitor_index].mon_screenshots) {
-        int  width = destination.width(), height = destination.height();
+        int  width = read_rect.width(), height = read_rect.height();
         char path[1024];
         char fn[256];
 
@@ -1801,7 +1839,7 @@ OpenGLRenderer::render()
         unsigned char *rgb = (unsigned char *) calloc(1, (size_t) width * height * 4);
 
         glw.glFinish();
-        glw.glReadPixels(window_rect.x, window_rect.y, width, height, GL_RGB, GL_UNSIGNED_BYTE, rgb);
+        glw.glReadPixels(read_rect.x(), read_rect.y(), width, height, GL_RGB, GL_UNSIGNED_BYTE, rgb);
 
         int pitch_adj = (4 - ((width * 3) & 3)) & 3;
         QImage image((uchar*)rgb, width, height, (width * 3) + pitch_adj, QImage::Format_RGB888);
@@ -1810,12 +1848,12 @@ OpenGLRenderer::render()
         free(rgb);
     }
     if (monitors[r_monitor_index].mon_screenshots_clipboard) {
-        int  width = destination.width(), height = destination.height();
+        int  width = read_rect.width(), height = read_rect.height();
 
         unsigned char *rgb = (unsigned char *) calloc(1, (size_t) width * height * 4);
 
         glw.glFinish();
-        glw.glReadPixels(window_rect.x, window_rect.y, width, height, GL_RGB, GL_UNSIGNED_BYTE, rgb);
+        glw.glReadPixels(read_rect.x(), read_rect.y(), width, height, GL_RGB, GL_UNSIGNED_BYTE, rgb);
 
         int pitch_adj = (4 - ((width * 3) & 3)) & 3;
         QImage image((uchar*)rgb, width, height, (width * 3) + pitch_adj, QImage::Format_RGB888);

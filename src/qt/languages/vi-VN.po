@@ -1,6 +1,6 @@
 msgid ""
 msgstr ""
-"PO-Revision-Date: 2026-07-21 10:48+0000\n"
+"PO-Revision-Date: 2026-11-04 14:27+0000\n"
 "Last-Translator: nguyen <barnacl437@disroot.org>\n"
 "Language-Team: Vietnamese <https://weblate.86box.net/projects/86box/86box/vi/"
 ">\n"
@@ -151,6 +151,15 @@ msgstr "Căn tỷ lệ số nguyên"
 msgid "4:&3 Integer scale"
 msgstr "Căn tỷ lệ 4:3 số nguyên"
 
+msgid "&Center"
+msgstr "Căn &giữa"
+
+msgid "4:3 Cen&ter"
+msgstr "Că&n giữa 4:3"
+
+msgid "4:3 Integer scale (&vertical)"
+msgstr ""
+
 msgid "Inverted VGA monitor"
 msgstr "Đảo màu VGA"
 
@@ -235,11 +244,32 @@ msgstr "&Âm thanh"
 msgid "&Preferences…"
 msgstr "&Tùy biến…"
 
-msgid "Enable &Discord integration"
-msgstr "Bật trình trạng thái cho Discord"
-
 msgid "Sound &gain…"
 msgstr "Bộ &tăng âm…"
+
+msgid "M&IDI output device"
+msgstr ""
+
+msgid "Restart &device"
+msgstr ""
+
+msgid "Send MIDI &command"
+msgstr ""
+
+msgid "&GM System On"
+msgstr ""
+
+msgid "G&S Reset"
+msgstr ""
+
+msgid "&XG System On"
+msgstr ""
+
+msgid "&MT-32 Reset"
+msgstr ""
+
+msgid "All &notes off"
+msgstr ""
 
 msgid "Begin trace"
 msgstr "Bắt đầu dò"
@@ -412,17 +442,35 @@ msgstr "MB"
 msgid "Memory:"
 msgstr "Bộ nhớ (RAM):"
 
-msgid "Time synchronization"
-msgstr "Đồng bộ thời gian"
+msgid "Synchronize with host clock"
+msgstr ""
 
-msgid "Disabled"
-msgstr "Vô hiệu hóa"
+msgid "Time zone:"
+msgstr ""
 
-msgid "Enabled (local time)"
-msgstr "Bật (giờ địa phương)"
+msgid "Local"
+msgstr ""
 
-msgid "Enabled (UTC)"
-msgstr "Bật (UTC)"
+msgid "UTC"
+msgstr ""
+
+msgid "Date:"
+msgstr ""
+
+msgid "Match the host"
+msgstr "Chung với máy host"
+
+msgid "Offset the year by:"
+msgstr ""
+
+msgid "(currently %1)"
+msgstr "(hiện tại %1)"
+
+msgid "Always use the year:"
+msgstr "Luôn sử dụng năm:"
+
+msgid "Do not synchronize the date"
+msgstr "Không đồng bộ ngày"
 
 msgid "Use the 486 interpreter for 286 and 386 processors"
 msgstr "Sử dụng trình thông dịch 486 cho các bộ xử lý 286 và 386"
@@ -431,7 +479,13 @@ msgid "Dynamic recompiler"
 msgstr "Bộ tái biên dịch động (Dynamic recompiler)"
 
 msgid "Accurate FPU environment on the dynamic recompiler"
-msgstr ""
+msgstr "Môi trường FPU chính xác trên bộ tái biên dịch động"
+
+msgid "Block linking on the dynamic recompiler"
+msgstr "Liên kết khối trên bộ tái biên dịch động"
+
+msgid "Debug registers on 486 and later processors"
+msgstr "Gỡ lỗi thanh ghi trên 486 và các vi xử lý sau này"
 
 msgid "CPU frame size"
 msgstr "Cỡ khung CPU"
@@ -463,6 +517,9 @@ msgstr "Đồ họa XGA"
 msgid "IBM PS/55 Display Adapter Graphics"
 msgstr "Đồ họa adaptor xuất hình IBM PS/55"
 
+msgid "PowerVR PCX1/PCX2 Graphics"
+msgstr ""
+
 msgid "SCSI:"
 msgstr "SCSI:"
 
@@ -485,16 +542,16 @@ msgid "&Mouse"
 msgstr "&Chuột"
 
 msgid "Tablet:"
-msgstr ""
+msgstr "Bảng vẽ điện tử:"
 
 msgid "Tablet"
-msgstr ""
+msgstr "Bảng vẽ điện tử"
 
 msgid "&Tablet"
-msgstr ""
+msgstr "&Bảng vẽ điện tử"
 
 msgid "Tablet (&Crosshair)"
-msgstr ""
+msgstr "Bảng vẽ điện tử (Có tâ&m ngắm)"
 
 msgid "Joystick:"
 msgstr "Cần điều khiển:"
@@ -624,6 +681,14 @@ msgstr "Bộ điều khiển 4:"
 
 msgid "Cassette"
 msgstr "Cassette"
+
+msgid "Turbo IDE"
+msgstr "IDE siêu tốc"
+
+msgid "Removes the IDE transfer mode speed limit. Hard disk and CD-ROM drive timings still apply."
+msgstr ""
+"Loại bỏ giới hạn tốc độ của chế độ truyền tải IDE. Định thời cho ổ cứng và "
+"CD-ROM vẫn được áp dụng."
 
 msgid "Hard disks:"
 msgstr "Đĩa cứng:"
@@ -857,7 +922,7 @@ msgid "Input devices"
 msgstr "Thiết bị nhập"
 
 msgid "Input &device"
-msgstr ""
+msgstr "Thiết bị nhập &liệu"
 
 msgid "Sound"
 msgstr "Âm thanh"
@@ -869,7 +934,7 @@ msgid "Ports (COM & LPT)"
 msgstr "Cổng (COM và LPT)"
 
 msgid "Port"
-msgstr ""
+msgstr "Cổng"
 
 msgid "Ports"
 msgstr "Cổng"
@@ -945,6 +1010,9 @@ msgstr "Nhấn %1 để thả chuột"
 
 msgid "Press %1 or middle button to release mouse"
 msgstr "Nhấn %1 hoặc nhấp chuột giữa để thả chuột"
+
+msgid "Press %1 or side button to release mouse"
+msgstr "Nhấn %1 hoặc phím cạnh để thả chuột"
 
 msgid "Bus"
 msgstr "Bus"
@@ -1269,7 +1337,36 @@ msgid "Use regular expressions in search box"
 msgstr "Dùng regex trong hộp tìm kiếm"
 
 msgid "Delete virtual machines to Recycle Bin"
-msgstr ""
+msgstr "Xóa máy ảo vào Thùng rác"
+
+msgid "Discord"
+msgstr "Discord"
+
+msgid "Show running machines in my Discord status"
+msgstr "Hiện các máy ảo đang chạy trong trạng thái Discord của tôi"
+
+msgid "Details shown:"
+msgstr "Chi tiết được hiển thị:"
+
+msgid "Machine name and hardware"
+msgstr "Tên máy và phần cứng"
+
+msgid "Hardware only"
+msgstr "Chỉ phần cứng"
+
+msgid "No details"
+msgstr "Không có chi tiết"
+
+msgid "Using %1"
+msgstr "Đang dùng %1"
+
+msgid "%n machine(s) active"
+msgid_plural "%n machines active"
+msgstr[0] "%n máy đang hoạt động"
+
+msgid " (+%n more)"
+msgid_plural " (+%n more)"
+msgstr[0] " (+%n mục nữa)"
 
 msgid "%n machine(s) are currently active. Are you sure you want to exit the VM manager anyway?"
 msgid_plural "%n machines are currently active. Are you sure you want to exit the VM manager anyway?"
@@ -1489,19 +1586,27 @@ msgid "ACP&I shutdown"
 msgstr "Tắt máy theo ACP&I"
 
 msgid "Power off"
-msgstr ""
+msgstr "Tắt nguồn"
 
 msgid "Power &off…"
-msgstr ""
+msgstr "Tắt nguồ&n…"
 
 msgid "Power &off"
-msgstr ""
+msgstr "Tắt &nguồn"
 
 msgid "Powering off the emulated machine may cause data loss. Are you sure you want to continue?"
 msgstr ""
+"Tắt nguồn máy ảo ngay bây giờ có thể làm mất mát dữ liệu. Bạn có muốn tiến "
+"hành không?"
 
 msgid "Hard disk (%1)"
 msgstr "Ổ cứng (%1)"
+
+msgid "Board LED"
+msgstr ""
+
+msgid "Board LED %1"
+msgstr ""
 
 msgid "Custom…"
 msgstr "Tùy chỉnh…"
@@ -2280,7 +2385,7 @@ msgid "Host ID"
 msgstr "ID máy chủ"
 
 msgid "Host"
-msgstr ""
+msgstr "Máy chủ"
 
 msgid "FDC Address"
 msgstr "Địa chỉ FDC"
@@ -2395,6 +2500,9 @@ msgstr "Loại dòng kép"
 
 msgid "Snow emulation"
 msgstr "Giả lập hiệu ứng tuyết"
+
+msgid "Display Enhancement Board (GO329)"
+msgstr ""
 
 msgid "Monitor type"
 msgstr "Loại màn hình"
@@ -2985,7 +3093,7 @@ msgid "Ask for confirmation before quitting"
 msgstr "Hỏi xác nhận trước khi thoát"
 
 msgid "Precache CHD files into memory"
-msgstr ""
+msgstr "Nạp trước bộ đệm các tập tin CHD vào bộ nhớ"
 
 msgid "Options"
 msgstr "Tùy chọn"
@@ -2997,34 +3105,34 @@ msgid "Model:"
 msgstr "Mẫu máy:"
 
 msgid "Brand:"
-msgstr ""
+msgstr "Nhãn hiệu:"
 
 msgid "Revision:"
-msgstr ""
+msgstr "Bản sửa đổi:"
 
 msgid "[Generic HDD] Device Configuration"
-msgstr ""
+msgstr "[HDD chung] Cấu hình thiết bị"
 
 msgid "Failed to initialize Vulkan renderer."
 msgstr "Không thể khởi tạo renderer Vulkan."
 
 msgid "Failed to create Vulkan 1.3 instance."
-msgstr ""
+msgstr "Không thể tạo bản thể Vulkan 1.3."
 
 msgid "No usable Vulkan physical devices found."
-msgstr ""
+msgstr "Không phát hiện thiết bị vật lý Vulkan nào có thể sử dụng."
 
 msgid "No Vulkan-capable physical devices found."
-msgstr ""
+msgstr "Không phát hiện thiết bị vật lý nào tương thích Vulkan."
 
 msgid "librashader not found. Shaders will not be available."
-msgstr ""
+msgstr "Không phát hiện librashader. Shader sẽ không hoạt động."
 
 msgid "Vulkan device lost."
-msgstr ""
+msgstr "Mất kết nối thiết bị Vulkan."
 
 msgid "Vulkan surface lost."
-msgstr ""
+msgstr "Mất bề mặt hiển thị Vulkan."
 
 msgid "GLSL Error"
 msgstr "Lỗi GLSL"
@@ -3048,7 +3156,7 @@ msgid "Shader Configuration"
 msgstr "Cấu hình shader"
 
 msgid "GPU:"
-msgstr ""
+msgstr "GPU:"
 
 msgid "Add"
 msgstr "Thêm"
@@ -3070,6 +3178,9 @@ msgstr "Đầu vào"
 
 msgid "Key bindings"
 msgstr "Phím nóng"
+
+msgid "VM Manager"
+msgstr "Trình quản lý máy ảo"
 
 msgid "Action"
 msgstr "Thực hiện"
@@ -3315,19 +3426,29 @@ msgstr "&Buộc thông dịch"
 msgid "&Allow recompilation"
 msgstr "&Cho phép biên dịch lại"
 
-#, fuzzy
 msgid "&Fast forward"
 msgstr "&Tăng tốc giả lập"
 
-#, fuzzy
+msgid "Fast forward at startup"
+msgstr ""
+
+msgid "Start new machines in fast forward"
+msgstr ""
+
+msgid "Only affects machines created from now on. Each machine can be changed in its settings, under Machine > Performance."
+msgstr ""
+
+msgid "Fast forward at &startup"
+msgstr ""
+
 msgid "Fast forward"
 msgstr "Tăng tốc giả lập"
 
 msgid "&Non-maskable interrupt"
-msgstr ""
+msgstr "Lệnh ngắt không t&hể chặn"
 
 msgid "Non-maskable interrupt"
-msgstr ""
+msgstr "Lệnh ngắt không thể chặn"
 
 msgid "To change the system directory, stop all running machines."
 msgstr "Để thay đổi thư mục hệ thống, hãy tắt tất cả các máy đang chạy."
@@ -3363,6 +3484,7 @@ msgstr ""
 
 msgid "Unable to load image \"%s\": %1 is missing, which is required for Aaru format image support."
 msgstr ""
+"Không thể nạp ảnh \"%s\": Bị thiếu %1 cần cho hỗ trợ định dạng ảnh Aaru."
 
 msgid "The DVD image \"%s\" has been inserted into a drive that does not support DVD media and will be ignored."
 msgstr ""
@@ -3510,8 +3632,683 @@ msgstr "938 (Trung phồn thể)"
 msgid "Sample rate:"
 msgstr "Tần số lấy mẫu:"
 
-msgid "CGA lightpen"
+msgid "Enable audio input (mic/line-in)"
+msgstr "Cho dùng đầu vào âm thanh (mic/line-in)"
+
+msgid "Audio input device:"
+msgstr "Thiết bị đầu vào âm thanh:"
+
+msgid "Audio input sample rate:"
+msgstr "Tần số lấy mẫu âm thanh vào:"
+
+msgid "Rate the emulator mixes to the host output device."
+msgstr "Chỉnh tần số lấy mẫu giả lập như của thiết bị host."
+
+msgid "Rate the host input capture device is opened at.\n\n44100 divides evenly by SB16/AWE32 rates of 44.1/22/11 kHz."
 msgstr ""
+"Tần số lẫy mẫu của thiết bị âm thanh đầu vào của host.\n"
+"\n"
+"44100 chia hết cho các mức 44,1/22/11kHz của SB16/AWE32."
+
+msgid "CGA lightpen"
+msgstr "Bút ánh sáng CGA"
 
 msgid "Luminance threshold (%)"
+msgstr "Ngưỡng độ sáng (%)"
+
+msgid "VFIO: Could not open /dev/vfio/vfio: %s. Make sure the vfio-pci module is loaded."
+msgstr ""
+"VFIO: Không thể mở /dev/vfio/vfio: %s. Hãy chắc chắn rằng module vfio-pci "
+"được nạp."
+
+msgid "VFIO %s: Invalid device location."
+msgstr "VFIO %s: Vị trí thiết bị không hợp lệ."
+
+msgid "VFIO %s: Device not found."
+msgstr "VFIO %s: Không tìm thấy thiết bị."
+
+msgid "VFIO %s: Device has no IOMMU group. Make sure VT-d or IOMMU is enabled on your system."
+msgstr ""
+"VFIO %s: Thiết bị không có nhóm IOMMU. Hãy chắc chắn rằng VT-d hoặc IOMMU "
+"được bật trên hệ thống của bạn."
+
+msgid "VFIO %s: Device is not bound to vfio-pci."
+msgstr "VFIO %s: Thiết bị không được liên kết với vfio-pci."
+
+msgid "VFIO %s: Could not open IOMMU group %d: %s"
+msgstr "VFIO %s: Không thể mở nhóm IOMMU %d: %s"
+
+msgid "VFIO %s: IOMMU group %d is not viable. All devices in the group must be bound to vfio-pci."
+msgstr ""
+"VFIO %s: Nhóm IOMMU %d không dùng được. Tất cả các thiết bị trong nhóm phải "
+"được liên kết đến vfio-pci."
+
+msgid "VFIO: Could not map guest memory for DMA: %s. The locked memory limit (ulimit -l) may be too low."
+msgstr ""
+"VFIO: Không thể ánh xạ bộ nhớ máy khách cho DMA: %s. Giới hạn bộ nhớ bị khóa "
+"(ulimit -l) có thể quá thấp."
+
+msgid "VFIO %s: Could not read ROM file \"%s\"; using the device's own ROM."
+msgstr ""
+"VFIO %s: Không đọc được tập tin ROM \"%s\"; sẽ dùng ROM tích hợp của thiết "
+"bị."
+
+msgid "VFIO %s: Could not read ROM file \"%s\"; the ROM is disabled."
+msgstr "VFIO %s: Không đọc được tập tin ROM \"%s\"; ROM đã bị vô hiệu hóa."
+
+msgid "VFIO %s: The ROM looks invalid. A custom ROM can be loaded through the VFIO settings."
+msgstr ""
+"VFIO %s: ROM có vẻ không hợp lệ. Một bản ROM tùy chỉnh có thể nạp qua cài "
+"đặt VFIO."
+
+msgid "VFIO: These devices must be bound to vfio-pci, which requires administrator rights:\n\n%s\nBind them now?"
+msgstr ""
+
+msgid "VFIO: Administrator rights are required to give 86Box access to the passed-through devices. Continue?"
+msgstr ""
+
+msgid "These devices were not selected, but share an IOMMU group with a selected device, so they will be bound as well:"
+msgstr ""
+
+msgid "VFIO %s: IOMMU group %d also contains %s, which the host needs. The group will not be bound to vfio-pci."
+msgstr ""
+
+msgid "VFIO: Could not prepare the devices for passthrough:\n%s"
+msgstr ""
+
+msgid "VFIO: Administrator rights could not be requested. To prepare the devices for passthrough, run this command, then hard reset:\n\n%s"
+msgstr ""
+
+msgid "Prepare PCI devices for VFIO passthrough"
+msgstr ""
+
+msgid "Authentication is required to prepare PCI devices for passthrough to 86Box."
+msgstr ""
+
+msgid "Disabled"
+msgstr ""
+
+msgid "Unlimited capacity"
+msgstr ""
+
+msgid "CD speed:"
+msgstr ""
+
+msgid "DVD speed:"
+msgstr ""
+
+msgid "HD/BD speed:"
+msgstr ""
+
+msgid "Software-initiated poweroff device (IBM 5140)"
+msgstr ""
+
+msgid "Memory &viewer"
+msgstr ""
+
+msgid "The emulator is busy; the memory view was not updated."
+msgstr ""
+
+msgid "The match is not on mapped memory; the selection and the view did not move."
+msgstr ""
+
+msgid "Only RAM and video memory can be written."
+msgstr ""
+
+msgid "not written (not writable RAM or video memory, or the emulator is busy)."
+msgstr ""
+
+msgid "The emulator is busy; try again."
+msgstr ""
+
+msgid "Copied %1 bytes from %2 to the clipboard"
+msgstr ""
+
+msgid " (%1 could not be read)"
+msgstr ""
+
+msgid " of a %1 byte selection"
+msgstr ""
+
+msgid "There is no mapped memory to search."
+msgstr ""
+
+msgid "There is no mapped memory in the requested range."
+msgstr ""
+
+msgid "The search is limited to %1 bytes."
+msgstr ""
+
+msgid "Searching memory..."
+msgstr ""
+
+msgid "The search was cancelled. The selection did not move."
+msgstr ""
+
+msgid "Found at %1."
+msgstr ""
+
+msgid "Not found. The selection did not move."
+msgstr ""
+
+msgid "Fill selection"
+msgstr ""
+
+msgid "Fill %1 bytes from %2 with (hex):"
+msgstr ""
+
+msgid "Enter a hex byte from 00 to FF."
+msgstr ""
+
+msgid "Filled %1 of %2 bytes with %3 (%4 were not writable RAM or video memory)."
+msgstr ""
+
+msgid " Selected: %1 bytes (%2 were skipped)."
+msgstr ""
+
+msgid "Edit byte"
+msgstr ""
+
+msgid "Copy selection (hex)"
+msgstr ""
+
+msgid "Copy selection (ASCII)"
+msgstr ""
+
+msgid "Fill selection..."
+msgstr ""
+
+msgid "Copy address"
+msgstr ""
+
+msgid "Disassemble here"
+msgstr ""
+
+msgid "Dump memory from here..."
+msgstr ""
+
+msgid "Memory viewer"
+msgstr ""
+
+msgid "Pause / Resume"
+msgstr ""
+
+msgid "Step"
+msgstr ""
+
+msgid "Run the given number of instructions (F11)"
+msgstr ""
+
+msgid "Instructions per step"
+msgstr ""
+
+msgid "Physical"
+msgstr ""
+
+msgid "Address, register or seg:off"
+msgstr ""
+
+msgid "Go"
+msgstr ""
+
+msgid "Live update"
+msgstr ""
+
+msgid "Dump..."
+msgstr ""
+
+msgid "Commands"
+msgstr ""
+
+msgid "Show or hide debugger commands (Ctrl+D)"
+msgstr ""
+
+msgid "Hex bytes"
+msgstr ""
+
+msgid "ASCII text"
+msgstr ""
+
+msgid "Value, byte"
+msgstr ""
+
+msgid "Value, word"
+msgstr ""
+
+msgid "Value, dword"
+msgstr ""
+
+msgid "What to look for: raw hex bytes, text, or a hex value stored little-endian, as in the hex view."
+msgstr ""
+
+msgid "Memory search"
+msgstr ""
+
+msgid "Ctrl+F focuses this box; Enter or F3 finds the next match, Shift+F3 the previous."
+msgstr ""
+
+msgid "Find previous"
+msgstr ""
+
+msgid "Search upwards from the selection (Shift+F3)"
+msgstr ""
+
+msgid "Find next"
+msgstr ""
+
+msgid "Search downwards from the selection (F3)"
+msgstr ""
+
+msgid "Range..."
+msgstr ""
+
+msgid "Search within an address range instead of all memory"
+msgstr ""
+
+msgid "From"
+msgstr ""
+
+msgid "Where the search starts (hex, register or seg:off; empty means the first mapped byte; . means the selection start)."
+msgstr ""
+
+msgid "To (inclusive)"
+msgstr ""
+
+msgid "Where the search ends, that address included (hex, register or seg:off; empty means the last mapped byte; . means the selection end)."
+msgstr ""
+
+msgid "Range from"
+msgstr ""
+
+msgid "to"
+msgstr ""
+
+msgid "RAM"
+msgstr ""
+
+msgid "Mapped, not RAM"
+msgstr ""
+
+msgid "Unmapped"
+msgstr ""
+
+msgid "Inaccessible"
+msgstr ""
+
+msgid "Inaccessible: only device handlers answer there (reading would have side effects), or the linear page is not present."
+msgstr ""
+
+msgid "Linear address, register or seg:off"
+msgstr ""
+
+msgid "Follow CS:IP"
+msgstr ""
+
+msgid "Bytes"
+msgstr ""
+
+msgid "Instruction"
+msgstr ""
+
+msgid "Note"
+msgstr ""
+
+msgid "Double-click a line to set or clear a breakpoint there"
+msgstr ""
+
+msgid "Disassembly"
+msgstr ""
+
+msgid "Disassembly (not available in this build)"
+msgstr ""
+
+msgid "Viewer message"
+msgstr ""
+
+msgid "Selected range"
+msgstr ""
+
+msgid "Debugger commands"
+msgstr ""
+
+msgid "Debugger command output"
+msgstr ""
+
+msgid "Debugger command"
+msgstr ""
+
+msgid "help — commands; Up/Down — history; . — selected address"
+msgstr ""
+
+msgid "Commands share the memory viewer's address space and selection. Type help for commands."
+msgstr ""
+
+msgid "Let the processor run (F5)"
+msgstr ""
+
+msgid "Stop the processor at the next instruction (F5)"
+msgstr ""
+
+msgid "Too many breakpoints."
+msgstr ""
+
+msgid "Stopped: %1"
+msgstr ""
+
+msgid "The emulator is busy; the view was not updated."
+msgstr ""
+
+msgid "Stopped at a breakpoint."
+msgstr ""
+
+msgid "Stopped after stepping."
+msgstr ""
+
+msgid "Stopped."
+msgstr ""
+
+msgid "Stepping..."
+msgstr ""
+
+msgid "Running."
+msgstr ""
+
+msgid "The emulator is paused; resume it to run or step."
+msgstr ""
+
+msgid "The dynamic recompiler is off while this window is open."
+msgstr ""
+
+msgid "Enter an address."
+msgstr ""
+
+msgid "The selector cannot be looked up."
+msgstr ""
+
+msgid "Unknown segment \"%1\"."
+msgstr ""
+
+msgid "Unknown offset \"%1\"."
+msgstr ""
+
+msgid "The linear address is not mapped to physical memory."
+msgstr ""
+
+msgid "\"%1\" is not an address or a register."
+msgstr ""
+
+msgid "Usage: %1"
+msgstr ""
+
+msgid "The selection is physical; use a linear address or switch to linear space."
+msgstr ""
+
+msgid "r name [hex-value]: read or edit a register supported by the current processor.\nEAX ECX EDX EBX ESP EBP ESI EDI; AX CX DX BX SP BP SI DI; AL CL DL BL AH CH DH BH\nIP EIP FLAGS EFLAGS; CS SS DS ES FS GS; MSW CR0 CR2 CR3 CR4; DR0..DR7\nGDTR.base GDTR.limit IDTR.base IDTR.limit LDTR TR\nCS/SS/DS/ES/FS/GS/LDTR/TR: .base .limit .access .flags (hidden descriptor cache)\nSelectors load descriptors without executing guest instructions; cache fields are literal edits.\nWrites require pause at a complete instruction boundary. NEC 8080-mode register edits are unavailable."
+msgstr ""
+
+msgid "Numbers are hexadecimal; step counts are decimal. Addresses accept registers and seg:off.\n. means the hex selection; omitted memory addresses use it.\nhelp | clear | refresh | regs\nrun | pause | step [count]\nspace physical|linear | goto address | db [address [length]] (max 1000 hex bytes)\nwrite address byte [byte ...] | dump (opens selection export)\ndbio [address [length]] | writeio address byte [byte ...] (device side effects; requires pause)\nu address (linear disassembly) | follow on|off\nbp address | bc address|all | bl (linear breakpoints)\nr [register [value]] (read/set; values are hex); help registers lists names\npeek port [b|w|d] | poke port value [b|w|d]\nRegister/memory writes and I/O require pause. I/O invokes device handlers, including read side effects."
+msgstr ""
+
+msgid "Register unavailable, value invalid, or processor not paused at a complete instruction boundary."
+msgstr ""
+
+msgid "Pause the processor before side-effecting memory access."
+msgstr ""
+
+msgid "Write exceeds 4096 bytes or wraps the address space."
+msgstr ""
+
+msgid "Pause the processor before writing memory."
+msgstr ""
+
+msgid "Issued %1 of %2 byte writes; devices may ignore writes. Untranslated addresses are skipped."
+msgstr ""
+
+msgid "Wrote %1 of %2 bytes; read-only or inaccessible bytes are skipped."
+msgstr ""
+
+msgid "Disassembly is not available in this build."
+msgstr ""
+
+msgid "Breakpoint %1 at %2."
+msgstr ""
+
+msgid "set"
+msgstr ""
+
+msgid "cleared"
+msgstr ""
+
+msgid "%1 breakpoint(s), linear addresses:"
+msgstr ""
+
+msgid "Pause the processor before accessing I/O ports."
+msgstr ""
+
+msgid "Unknown command or invalid arguments. Type help for syntax."
+msgstr ""
+
+msgid "Dump memory"
+msgstr ""
+
+msgid "Browse..."
+msgstr ""
+
+msgid "Start (hex, register or seg:off):"
+msgstr ""
+
+msgid "Length (hex bytes):"
+msgstr ""
+
+msgid "Address space:"
+msgstr ""
+
+msgid "Fill byte for memory that cannot be read:"
+msgstr ""
+
+msgid "File:"
+msgstr ""
+
+msgid "Only RAM and other directly mapped memory is read. Unmapped and inaccessible bytes are not read; the fill byte is written in their place."
+msgstr ""
+
+msgid "Binary files (*.bin);;All files (*)"
+msgstr ""
+
+msgid "The length must be a hex number above 0."
+msgstr ""
+
+msgid "The fill byte must be a hex number from 00 to FF."
+msgstr ""
+
+msgid "Could not open %1 for writing."
+msgstr ""
+
+msgid "Dumping memory..."
+msgstr ""
+
+msgid "Could not write to %1."
+msgstr ""
+
+msgid "Dumped %1 bytes from %2 to %3 (%4 bytes could not be read and were filled)."
+msgstr ""
+
+msgid "Enter hex bytes in pairs, e.g. \"8B 44 24 08\"."
+msgstr ""
+
+msgid "\"%1\" is not made of hex bytes."
+msgstr ""
+
+msgid "Enter a hex value from 0 to %1."
+msgstr ""
+
+msgid "The value is too large for %1 bytes."
+msgstr ""
+
+msgid "Enter something to search for."
+msgstr ""
+
+msgid "The range ends before it starts."
+msgstr ""
+
+msgid "Serial Plug and Play"
+msgstr ""
+
+msgid "Standard 9600 bps modem (PNPC100)"
+msgstr ""
+
+msgid "Standard 14400 bps modem (PNPC101)"
+msgstr ""
+
+msgid "Standard 28800 bps modem (PNPC102)"
+msgstr ""
+
+msgid "Standard modem (PNPC103)"
+msgstr ""
+
+msgid "Enhanced 9600 bps modem (PNPC104)"
+msgstr ""
+
+msgid "Enhanced 14400 bps modem (PNPC105)"
+msgstr ""
+
+msgid "Enhanced 28800 bps modem (PNPC106)"
+msgstr ""
+
+msgid "Enhanced modem (PNPC107)"
+msgstr ""
+
+msgid "Telephone Tone Region"
+msgstr ""
+
+msgid "North America"
+msgstr ""
+
+msgid "United Kingdom"
+msgstr ""
+
+msgid "Continental Europe"
+msgstr ""
+
+msgid "Japan"
+msgstr ""
+
+msgid "Handshake Modem Standard"
+msgstr ""
+
+msgid "Automatic (from DTE speed)"
+msgstr ""
+
+msgid "Connection Type"
+msgstr ""
+
+msgid "Username"
+msgstr ""
+
+msgid "Password"
+msgstr ""
+
+msgid "PPP Compression and Encryption"
+msgstr ""
+
+msgid "Automatic"
+msgstr ""
+
+msgid "Require MPPE"
+msgstr ""
+
+msgid "PPP Multilink Group (same on each link)"
+msgstr ""
+
+msgid "PPP Primary DNS Server"
+msgstr ""
+
+msgid "PPP Secondary DNS Server"
+msgstr ""
+
+msgid "CCP Directional Negotiation"
+msgstr ""
+
+msgid "Bidirectional"
+msgstr ""
+
+msgid "Transmit-Only"
+msgstr ""
+
+msgid "Receive-Only"
+msgstr ""
+
+msgid "Asymmetric Preferred"
+msgstr ""
+
+msgid "PPP Callback (Microsoft CBCP)"
+msgstr ""
+
+msgid "Offered (caller may decline)"
+msgstr ""
+
+msgid "Required (caller must accept)"
+msgstr ""
+
+msgid "PPP Keepalive Interval (seconds, 0 = off)"
+msgstr ""
+
+msgid "Report received DTMF to the host (<DLE>digit)"
+msgstr ""
+
+msgid "Off (only with +VDR=1)"
+msgstr ""
+
+msgid "Caller ID between emulator instances (enable on both)"
+msgstr ""
+
+msgid "Caller ID sent when dialling (number,name)"
+msgstr ""
+
+msgid "Network to guest queue limit (back-pressure)"
+msgstr ""
+
+msgid "Unlimited (legacy)"
+msgstr ""
+
+msgid "250 ms of line time"
+msgstr ""
+
+msgid "500 ms of line time"
+msgstr ""
+
+msgid "1 s of line time"
+msgstr ""
+
+msgid "2 s of line time"
+msgstr ""
+
+msgid "TCP send timeout"
+msgstr ""
+
+msgid "Card:"
+msgstr ""
+
+msgid "Hub:"
+msgstr ""
+
+msgid "Mass storage:"
+msgstr ""
+
+msgid "Its drives are hard disks, CD-ROM drives and other removable devices set up on their own pages, on bus SCSI, in the channels named \"USB Mass Storage\". Each drive is one logical unit, in channel order."
+msgstr ""
+
+msgid "Hard disks…"
+msgstr ""
+
+msgid "CD-ROM drives…"
+msgstr ""
+
+msgid "Other removable devices…"
+msgstr ""
+
+msgid "4-port USB 1.1 hub"
+msgstr ""
+
+msgid "USB Mass Storage"
 msgstr ""

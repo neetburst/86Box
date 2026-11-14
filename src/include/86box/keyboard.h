@@ -19,10 +19,14 @@
 #ifndef EMU_KEYBOARD_H
 #define EMU_KEYBOARD_H
 
+#include <stdint.h>
+
 #define FLAG_AT        0x00  /* dev is AT         */
-#define FLAG_PS2_KBD   0x10  /* dev is AT or PS/2 */
 #define FLAG_AX        0x08  /* dev is AX         */
-#define FLAG_TYPE_MASK 0x07  /* mask for type     */
+#define FLAG_PS2_KBD   0x10  /* dev is PS/2       */
+#define FLAG_PS55_KBD  0x20  /* dev is PS/55      */
+#define FLAG_LK250_KBD 0x40  /* dev is DEC LK250  */
+#define FLAG_TYPE_MASK 0x07  /* mask for kbd type */
 
 enum {
     KBD_83_KEY = 0,
@@ -56,8 +60,18 @@ enum {
     KEYBOARD_TYPE_AT,
     KEYBOARD_TYPE_AX,
     KEYBOARD_TYPE_PS2,
-    KEYBOARD_TYPE_PS55
+    KEYBOARD_TYPE_PS55,
+    KEYBOARD_TYPE_USB
 };
+
+/* Open-collector keyboard clock/data lines shared by the firmware KBC and the
+   keyboard device. A line is high only when neither side pulls it low. */
+typedef struct {
+    uint8_t kbc_clk;
+    uint8_t kbc_data;
+    uint8_t kbd_clk;
+    uint8_t kbd_data;
+} kbc_upi42_bus_t;
 
 /* Used by the AT / PS/2 keyboard controller, common device, keyboard, and mouse. */
 typedef struct kbc_at_port_t {
@@ -76,6 +90,8 @@ typedef struct atkbc_dev_t {
     const char *name; /* name of this device */
 
     uint8_t     type;
+    uint8_t     ps55;
+    uint8_t     lk250;
     uint8_t     command;
     uint8_t     last_scan_code;
     uint8_t     state;
@@ -145,12 +161,17 @@ typedef struct scancode {
 #define KBC_VEN_VIA              0x10
 #define KBC_VEN_UMC              0x11
 #define KBC_VEN_SIS              0x12
+#define KBC_VEN_HP_VECTRA        0x13
+#define KBC_VEN_DEC_LK250        0x14
 #define KBC_VEN_MASK             0x1f
 
 #define KBC_FLAG_IS_ASIC   0x80000000
 #define KBC_FLAG_IS_CLONE  0x40000000
 #define KBC_FLAG_IS_GREEN  0x20000000
 #define KBC_FLAG_IS_TYPE2  0x10000000
+
+/* UPI-42 keyboard controller firmware image, relative to the ROM path. */
+#define KBC_UPI42_ROM_IBM_1983 "roms/kbc/ibm/1503033.bin"
 
 #ifdef __cplusplus
 extern "C" {
@@ -182,6 +203,7 @@ extern int     mouse_cmd_queue_end;
 extern int     mouse_scan;
 
 extern kbc_at_port_t     *kbc_at_ports[2];
+extern kbc_upi42_bus_t   *kbc_at_upi42_bus;
 
 #ifdef EMU_DEVICE_H
 extern const device_t kbc_pc_device;
@@ -202,14 +224,21 @@ extern const device_t kbc_xt_jukost_device;
 extern const device_t kbc_xtclone_device;
 
 extern const device_t kbc_at_device;
+extern const device_t kbc_at_upi42_device;
+extern int            kbc_at_upi42_available(const char *rom_path);
+extern const device_t kbc_at_vectra_device;
 extern const device_t kbc_ps2_m25_device;
+extern const device_t kbc_tvis_device;
 
 extern const device_t keyboard_pc_xt_device;
 extern const device_t keyboard_at_device;
 extern const device_t keyboard_ax_device;
 extern const device_t keyboard_ps2_device;
 extern const device_t keyboard_ps55_device;
+extern const device_t keyboard_lk250_device;
 extern const device_t keyboard_at_generic_device;
+
+extern const device_t keyboard_usb_device;
 #endif /*EMU_DEVICE_H*/
 
 extern void     keyboard_toggle_override(void);
